@@ -1,0 +1,6 @@
+{
+  "name": "Vortex Researcher",
+  "description": "Multi-expert 7-stage cognitive research synthesizer with Strategic Model Routing, live Google Search grounding, team repo collaboration, GitHub mirroring, AI Roundtable audits, and versioned PRDs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

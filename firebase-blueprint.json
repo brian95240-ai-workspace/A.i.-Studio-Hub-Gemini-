@@ -1,0 +1,161 @@
+{
+  "entities": {
+    "ResearchProject": {
+      "title": "ResearchProject",
+      "description": "A Vortex Researcher session or structured project repository with 7-stage pipeline output, nested scaffolding files, and RBAC team membership.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "description": "Firebase Auth UID of the project creator" },
+        "title": { "type": "string", "description": "Human-readable research project title" },
+        "rootFolderName": { "type": "string", "description": "Repository root folder name" },
+        "mode": { "type": "string", "enum": ["CHAT", "PROJECT"] },
+        "fileFormat": { "type": "string", "enum": ["MD", "TXT"] },
+        "blueprintId": { "type": "string", "enum": ["SYSTEM_ARCHITECTURE_CANONICAL", "SYSTEMS_ADR", "ACADEMIC_DOSSIER", "PRODUCT_MONOREPO", "FLAT_MINIMALIST"] },
+        "query": { "type": "string", "description": "Primary research prompt" },
+        "complexityScore": { "type": "integer" },
+        "detectedDomain": { "type": "string" },
+        "routingPlanSummary": { "type": "string" },
+        "pipelineStatus": { "type": "string", "enum": ["IDLE", "RUNNING", "COMPLETED", "FAILED"] },
+        "gapVerdict": { "type": "string", "enum": ["NONE", "RESOLVED", "NEEDS_EMULATION_LAYER", "NEEDS_LOOPHOLE_MITIGATION"] },
+        "stagesJson": { "type": "string", "description": "JSON array of 7-stage research outputs and grounding citations" },
+        "filesJson": { "type": "string", "description": "JSON array of nested repository files including PRD index" },
+        "chatAnswer": { "type": "string" },
+        "approved": { "type": "boolean" },
+        "latestPrdVersion": { "type": "string" },
+        "githubRepoUrl": { "type": "string" },
+        "githubBranch": { "type": "string" },
+        "publicShareCode": { "type": "string" },
+        "publicShareActive": { "type": "boolean" },
+        "lastJoinedInviteCode": { "type": "string" },
+        "roundtableFolders": { "type": "array", "items": { "type": "string" }, "description": "Per-project AI model sub-directories inside the A.i. Roundtable folder" },
+        "memberUids": { "type": "array", "items": { "type": "string" } },
+        "memberRoles": { "type": "object", "description": "Map of uid to ADMIN, EDITOR, or VIEWER" },
+        "memberDisplayNames": { "type": "object", "description": "Map of uid to display name (no PII/emails)" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerId", "title", "rootFolderName", "mode", "fileFormat", "blueprintId",
+        "query", "complexityScore", "detectedDomain", "routingPlanSummary",
+        "pipelineStatus", "gapVerdict", "stagesJson", "filesJson", "chatAnswer",
+        "approved", "latestPrdVersion", "githubRepoUrl", "githubBranch",
+        "publicShareCode", "publicShareActive", "memberUids", "memberRoles",
+        "memberDisplayNames", "createdAt", "updatedAt"
+      ]
+    },
+    "PrdDocument": {
+      "title": "PrdDocument",
+      "description": "Immutable versioned Product Requirements Document (v1.0, v1.1, v2.0) stored under a project.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "version": { "type": "string" },
+        "majorVersion": { "type": "integer" },
+        "minorVersion": { "type": "integer" },
+        "title": { "type": "string" },
+        "deltaSummary": { "type": "string" },
+        "revisionRequest": { "type": "string" },
+        "markdownContent": { "type": "string" },
+        "modelUsed": { "type": "string" },
+        "authorUid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "projectId", "version", "majorVersion", "minorVersion", "title",
+        "deltaSummary", "revisionRequest", "markdownContent", "modelUsed",
+        "authorUid", "authorName", "createdAt"
+      ]
+    },
+    "RoundtableItem": {
+      "title": "RoundtableItem",
+      "description": "External AI model artifact or code file in AI_Roundtable/ with Gemini scrutiny verdict and outbound relay text.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "modelFolder": { "type": "string" },
+        "fileName": { "type": "string" },
+        "extension": { "type": "string" },
+        "detectedLanguage": { "type": "string" },
+        "content": { "type": "string" },
+        "byteSize": { "type": "integer" },
+        "queueStatus": { "type": "string", "enum": ["QUEUED", "ANALYZING", "ADOPTED", "REBUTTAL_NEEDED", "CONSENSUS_RESOLVED", "REJECTED"] },
+        "scrutinyVerdict": { "type": "string" },
+        "outboundRelayPrompt": { "type": "string" },
+        "groundingSourcesJson": { "type": "string" },
+        "scrutinizedByModel": { "type": "string" },
+        "authorUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "projectId", "modelFolder", "fileName", "extension", "detectedLanguage",
+        "content", "byteSize", "queueStatus", "scrutinyVerdict", "outboundRelayPrompt",
+        "groundingSourcesJson", "scrutinizedByModel", "authorUid", "createdAt", "updatedAt"
+      ]
+    },
+    "ProjectInvite": {
+      "title": "ProjectInvite",
+      "description": "Shareable invite token granting VIEWER or EDITOR access to a specific project.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "projectTitle": { "type": "string" },
+        "assignedRole": { "type": "string", "enum": ["VIEWER", "EDITOR"] },
+        "createdByUid": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "projectTitle", "assignedRole", "createdByUid", "active", "createdAt"]
+    },
+    "PublicShareSnapshot": {
+      "title": "PublicShareSnapshot",
+      "description": "PII-scrubbed read-only snapshot accessible via unguessable share code without Google Sign-In.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "title": { "type": "string" },
+        "rootFolderName": { "type": "string" },
+        "mode": { "type": "string", "enum": ["CHAT", "PROJECT"] },
+        "fileFormat": { "type": "string", "enum": ["MD", "TXT"] },
+        "blueprintId": { "type": "string", "enum": ["SYSTEM_ARCHITECTURE_CANONICAL", "SYSTEMS_ADR", "ACADEMIC_DOSSIER", "PRODUCT_MONOREPO", "FLAT_MINIMALIST"] },
+        "query": { "type": "string" },
+        "detectedDomain": { "type": "string" },
+        "stagesJson": { "type": "string" },
+        "filesJson": { "type": "string" },
+        "chatAnswer": { "type": "string" },
+        "latestPrdVersion": { "type": "string" },
+        "latestPrdMarkdown": { "type": "string" },
+        "prdIndexMarkdown": { "type": "string" },
+        "publishedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "projectId", "title", "rootFolderName", "mode", "fileFormat", "blueprintId",
+        "query", "detectedDomain", "stagesJson", "filesJson", "chatAnswer",
+        "latestPrdVersion", "latestPrdMarkdown", "prdIndexMarkdown", "publishedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/ResearchProject" },
+      "description": "Collaborative research projects with RBAC roles and nested repo files."
+    },
+    "/projects/{projectId}/prds/{prdId}": {
+      "schema": { "$ref": "#/entities/PrdDocument" },
+      "description": "Immutable versioned PRDs for a project."
+    },
+    "/projects/{projectId}/roundtableItems/{itemId}": {
+      "schema": { "$ref": "#/entities/RoundtableItem" },
+      "description": "Attributed multi-model artifacts, code uploads, and Gemini scrutiny records."
+    },
+    "/projectInvites/{inviteCode}": {
+      "schema": { "$ref": "#/entities/ProjectInvite" },
+      "description": "Invite tokens for joining collaborative projects as VIEWER or EDITOR."
+    },
+    "/publicShares/{shareCode}": {
+      "schema": { "$ref": "#/entities/PublicShareSnapshot" },
+      "description": "Sign-in-free read-only project snapshots keyed by unguessable shareCode."
+    }
+  }
+}

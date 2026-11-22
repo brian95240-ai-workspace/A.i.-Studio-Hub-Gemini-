@@ -1,0 +1,341 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidTimestamp(val) {
+      return val is timestamp && val <= request.time;
+    }
+
+    function isProjectMember(data) {
+      return isSignedIn() && request.auth.uid in data.memberUids;
+    }
+
+    function isProjectAdmin(data) {
+      return isProjectMember(data) && (
+        data.ownerId == request.auth.uid ||
+        data.memberRoles[request.auth.uid] == 'ADMIN'
+      );
+    }
+
+    function isProjectEditor(data) {
+      return isProjectMember(data) && (
+        data.ownerId == request.auth.uid ||
+        data.memberRoles[request.auth.uid] in ['ADMIN', 'EDITOR']
+      );
+    }
+
+    function parentProject(projectId) {
+      return get(/databases/$(database)/documents/projects/$(projectId)).data;
+    }
+
+    function isParentProjectMember(projectId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/projects/$(projectId)) &&
+        request.auth.uid in parentProject(projectId).memberUids;
+    }
+
+    function isParentProjectEditorOrAdmin(projectId) {
+      return isParentProjectMember(projectId) && (
+        parentProject(projectId).ownerId == request.auth.uid ||
+        parentProject(projectId).memberRoles[request.auth.uid] in ['ADMIN', 'EDITOR']
+      );
+    }
+
+    function isParentProjectAdmin(projectId) {
+      return isParentProjectMember(projectId) && (
+        parentProject(projectId).ownerId == request.auth.uid ||
+        parentProject(projectId).memberRoles[request.auth.uid] == 'ADMIN'
+      );
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidProject(data) {
+      return data.keys().hasAll([
+        'ownerId', 'title', 'rootFolderName', 'mode', 'fileFormat', 'blueprintId',
+        'query', 'complexityScore', 'detectedDomain', 'routingPlanSummary',
+        'pipelineStatus', 'gapVerdict', 'stagesJson', 'filesJson', 'chatAnswer',
+        'approved', 'latestPrdVersion', 'githubRepoUrl', 'githubBranch',
+        'publicShareCode', 'publicShareActive', 'memberUids', 'memberRoles',
+        'memberDisplayNames', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerId', 'title', 'rootFolderName', 'mode', 'fileFormat', 'blueprintId',
+        'query', 'complexityScore', 'detectedDomain', 'routingPlanSummary',
+        'pipelineStatus', 'gapVerdict', 'stagesJson', 'filesJson', 'chatAnswer', 'chatHistoryJson',
+        'approved', 'latestPrdVersion', 'githubRepoUrl', 'githubBranch',
+        'publicShareCode', 'publicShareActive', 'lastJoinedInviteCode', 'roundtableFolders', 'tags',
+        'memberUids', 'memberRoles', 'memberDisplayNames', 'createdAt', 'updatedAt'
+      ]) &&
+      isValidString(data.ownerId, 1, 128) &&
+      isValidString(data.title, 1, 200) &&
+      isValidString(data.rootFolderName, 1, 120) &&
+      data.mode in ['CHAT', 'PROJECT'] &&
+      data.fileFormat in ['MD', 'TXT'] &&
+      data.blueprintId in ['SYSTEM_ARCHITECTURE_CANONICAL', 'SYSTEMS_ADR', 'ACADEMIC_DOSSIER', 'PRODUCT_MONOREPO', 'FLAT_MINIMALIST'] &&
+      isValidString(data.query, 0, 10000) &&
+      data.complexityScore is int && data.complexityScore >= 0 && data.complexityScore <= 10 &&
+      isValidString(data.detectedDomain, 0, 120) &&
+      isValidString(data.routingPlanSummary, 0, 500) &&
+      data.pipelineStatus in ['IDLE', 'RUNNING', 'COMPLETED', 'FAILED'] &&
+      data.gapVerdict in ['NONE', 'RESOLVED', 'NEEDS_EMULATION_LAYER', 'NEEDS_LOOPHOLE_MITIGATION'] &&
+      isValidString(data.stagesJson, 0, 300000) &&
+      isValidString(data.filesJson, 0, 450000) &&
+      isValidString(data.chatAnswer, 0, 200000) &&
+      (!('chatHistoryJson' in data) || isValidString(data.chatHistoryJson, 0, 220000)) &&
+      data.approved is bool &&
+      isValidString(data.latestPrdVersion, 0, 32) &&
+      isValidString(data.githubRepoUrl, 0, 300) &&
+      isValidString(data.githubBranch, 0, 80) &&
+      isValidString(data.publicShareCode, 0, 64) &&
+      data.publicShareActive is bool &&
+      (!('lastJoinedInviteCode' in data) || isValidString(data.lastJoinedInviteCode, 0, 64)) &&
+      (!('roundtableFolders' in data) || (data.roundtableFolders is list && data.roundtableFolders.size() <= 40)) &&
+      (!('tags' in data) || (data.tags is list && data.tags.size() <= 24)) &&
+      data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 50 &&
+      data.ownerId in data.memberUids &&
+      data.memberRoles is map &&
+      data.memberRoles[data.ownerId] == 'ADMIN' &&
+      data.memberDisplayNames is map &&
+      isValidTimestamp(data.createdAt) &&
+      isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidEditorContentUpdate(newData, oldData) {
+      return newData.diff(oldData).affectedKeys().hasOnly([
+        'title', 'rootFolderName', 'mode', 'fileFormat', 'blueprintId',
+        'query', 'complexityScore', 'detectedDomain', 'routingPlanSummary',
+        'pipelineStatus', 'gapVerdict', 'stagesJson', 'filesJson', 'chatAnswer', 'chatHistoryJson',
+        'approved', 'latestPrdVersion', 'githubRepoUrl', 'githubBranch', 'roundtableFolders', 'tags', 'updatedAt'
+      ]);
+    }
+
+    function isValidInviteSelfJoin(projectId, newData, oldData) {
+      let code = newData.lastJoinedInviteCode;
+      return isSignedIn() &&
+        !(request.auth.uid in oldData.memberUids) &&
+        newData.diff(oldData).affectedKeys().hasOnly([
+          'memberUids', 'memberRoles', 'memberDisplayNames', 'lastJoinedInviteCode', 'updatedAt'
+        ]) &&
+        isValidId(code) &&
+        exists(/databases/$(database)/documents/projectInvites/$(code)) &&
+        get(/databases/$(database)/documents/projectInvites/$(code)).data.active == true &&
+        get(/databases/$(database)/documents/projectInvites/$(code)).data.projectId == projectId &&
+        get(/databases/$(database)/documents/projectInvites/$(code)).data.assignedRole in ['VIEWER', 'EDITOR'] &&
+        newData.memberUids.size() == oldData.memberUids.size() + 1 &&
+        newData.memberUids.hasAll(oldData.memberUids) &&
+        request.auth.uid in newData.memberUids &&
+        newData.memberRoles.diff(oldData.memberRoles).affectedKeys().hasOnly([request.auth.uid]) &&
+        newData.memberRoles[request.auth.uid] == get(/databases/$(database)/documents/projectInvites/$(code)).data.assignedRole &&
+        newData.memberDisplayNames.diff(oldData.memberDisplayNames).affectedKeys().hasOnly([request.auth.uid]) &&
+        isValidString(newData.memberDisplayNames[request.auth.uid], 1, 80);
+    }
+
+    function isValidPrd(data, projectId) {
+      return data.keys().hasAll([
+        'projectId', 'version', 'majorVersion', 'minorVersion', 'title',
+        'deltaSummary', 'revisionRequest', 'markdownContent', 'modelUsed',
+        'authorUid', 'authorName', 'createdAt'
+      ]) &&
+      data.keys().hasOnly([
+        'projectId', 'version', 'majorVersion', 'minorVersion', 'title',
+        'deltaSummary', 'revisionRequest', 'markdownContent', 'modelUsed',
+        'authorUid', 'authorName', 'createdAt'
+      ]) &&
+      data.projectId == projectId &&
+      isValidString(data.version, 1, 24) &&
+      data.majorVersion is int && data.majorVersion >= 1 && data.majorVersion <= 999 &&
+      data.minorVersion is int && data.minorVersion >= 0 && data.minorVersion <= 999 &&
+      isValidString(data.title, 1, 200) &&
+      isValidString(data.deltaSummary, 1, 600) &&
+      isValidString(data.revisionRequest, 0, 4000) &&
+      isValidString(data.markdownContent, 1, 400000) &&
+      isValidString(data.modelUsed, 1, 100) &&
+      isValidString(data.authorUid, 1, 128) &&
+      isValidString(data.authorName, 1, 80) &&
+      isValidTimestamp(data.createdAt);
+    }
+
+    function isValidRoundtableItem(data, projectId) {
+      return data.keys().hasAll([
+        'projectId', 'modelFolder', 'fileName', 'extension', 'detectedLanguage',
+        'content', 'byteSize', 'queueStatus', 'scrutinyVerdict', 'outboundRelayPrompt',
+        'groundingSourcesJson', 'scrutinizedByModel', 'authorUid', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'projectId', 'modelFolder', 'fileName', 'extension', 'detectedLanguage',
+        'content', 'byteSize', 'queueStatus', 'scrutinyVerdict', 'outboundRelayPrompt',
+        'groundingSourcesJson', 'scrutinizedByModel', 'authorUid', 'createdAt', 'updatedAt'
+      ]) &&
+      data.projectId == projectId &&
+      isValidString(data.modelFolder, 1, 80) &&
+      isValidString(data.fileName, 1, 180) &&
+      isValidString(data.extension, 0, 24) &&
+      isValidString(data.detectedLanguage, 0, 60) &&
+      isValidString(data.content, 1, 350000) &&
+      data.byteSize is int && data.byteSize >= 0 && data.byteSize <= 25000000 &&
+      data.queueStatus in ['QUEUED', 'ANALYZING', 'ADOPTED', 'REBUTTAL_NEEDED', 'CONSENSUS_RESOLVED', 'REJECTED'] &&
+      isValidString(data.scrutinyVerdict, 0, 100000) &&
+      isValidString(data.outboundRelayPrompt, 0, 50000) &&
+      isValidString(data.groundingSourcesJson, 0, 50000) &&
+      isValidString(data.scrutinizedByModel, 0, 100) &&
+      isValidString(data.authorUid, 1, 128) &&
+      isValidTimestamp(data.createdAt) &&
+      isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidProjectInvite(data) {
+      return data.keys().hasAll([
+        'projectId', 'projectTitle', 'assignedRole', 'createdByUid', 'active', 'createdAt'
+      ]) &&
+      data.keys().hasOnly([
+        'projectId', 'projectTitle', 'assignedRole', 'createdByUid', 'active', 'createdAt'
+      ]) &&
+      isValidId(data.projectId) &&
+      isValidString(data.projectTitle, 1, 200) &&
+      data.assignedRole in ['VIEWER', 'EDITOR'] &&
+      isValidString(data.createdByUid, 1, 128) &&
+      data.active is bool &&
+      isValidTimestamp(data.createdAt);
+    }
+
+    function isValidPublicShare(data) {
+      return data.keys().hasAll([
+        'projectId', 'title', 'rootFolderName', 'mode', 'fileFormat', 'blueprintId',
+        'query', 'detectedDomain', 'stagesJson', 'filesJson', 'chatAnswer',
+        'latestPrdVersion', 'latestPrdMarkdown', 'prdIndexMarkdown', 'publishedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'projectId', 'title', 'rootFolderName', 'mode', 'fileFormat', 'blueprintId',
+        'query', 'detectedDomain', 'stagesJson', 'filesJson', 'chatAnswer',
+        'latestPrdVersion', 'latestPrdMarkdown', 'prdIndexMarkdown',
+        'prdsJson', 'roundtableJson', 'publishedAt'
+      ]) &&
+      isValidId(data.projectId) &&
+      isValidString(data.title, 1, 200) &&
+      isValidString(data.rootFolderName, 1, 120) &&
+      data.mode in ['CHAT', 'PROJECT'] &&
+      data.fileFormat in ['MD', 'TXT'] &&
+      data.blueprintId in ['SYSTEM_ARCHITECTURE_CANONICAL', 'SYSTEMS_ADR', 'ACADEMIC_DOSSIER', 'PRODUCT_MONOREPO', 'FLAT_MINIMALIST'] &&
+      isValidString(data.query, 0, 10000) &&
+      isValidString(data.detectedDomain, 0, 120) &&
+      isValidString(data.stagesJson, 0, 300000) &&
+      isValidString(data.filesJson, 0, 450000) &&
+      isValidString(data.chatAnswer, 0, 200000) &&
+      isValidString(data.latestPrdVersion, 0, 32) &&
+      isValidString(data.latestPrdMarkdown, 0, 200000) &&
+      isValidString(data.prdIndexMarkdown, 0, 50000) &&
+      (!('prdsJson' in data) || isValidString(data.prdsJson, 0, 200000)) &&
+      (!('roundtableJson' in data) || isValidString(data.roundtableJson, 0, 200000)) &&
+      isValidTimestamp(data.publishedAt);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+    match /projects/{projectId} {
+      allow get: if isProjectMember(resource.data);
+      allow list: if isProjectMember(resource.data);
+
+      allow create: if isSignedIn() &&
+        isValidId(projectId) &&
+        isValidProject(request.resource.data) &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.memberUids == [request.auth.uid] &&
+        request.resource.data.memberRoles.keys().hasOnly([request.auth.uid]) &&
+        request.resource.data.memberRoles[request.auth.uid] == 'ADMIN';
+
+      allow update: if isSignedIn() &&
+        isValidProject(request.resource.data) &&
+        request.resource.data.ownerId == resource.data.ownerId &&
+        request.resource.data.createdAt == resource.data.createdAt && (
+          isProjectAdmin(resource.data) ||
+          (isProjectEditor(resource.data) && isValidEditorContentUpdate(request.resource.data, resource.data)) ||
+          isValidInviteSelfJoin(projectId, request.resource.data, resource.data)
+        );
+
+      allow delete: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+
+      match /prds/{prdId} {
+        allow get, list: if isParentProjectMember(projectId);
+        allow create: if isSignedIn() &&
+          isValidId(prdId) &&
+          isParentProjectEditorOrAdmin(projectId) &&
+          isValidPrd(request.resource.data, projectId) &&
+          request.resource.data.authorUid == request.auth.uid;
+        allow update: if false;
+        allow delete: if isParentProjectAdmin(projectId);
+      }
+
+      match /roundtableItems/{itemId} {
+        allow get, list: if isParentProjectMember(projectId);
+        allow create: if isSignedIn() &&
+          isValidId(itemId) &&
+          isParentProjectEditorOrAdmin(projectId) &&
+          isValidRoundtableItem(request.resource.data, projectId) &&
+          request.resource.data.authorUid == request.auth.uid;
+        allow update: if isSignedIn() &&
+          isParentProjectEditorOrAdmin(projectId) &&
+          isValidRoundtableItem(request.resource.data, projectId) &&
+          request.resource.data.authorUid == resource.data.authorUid &&
+          request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if isParentProjectEditorOrAdmin(projectId);
+      }
+    }
+
+    match /projectInvites/{inviteCode} {
+      allow get: if isSignedIn() && isValidId(inviteCode);
+      allow list: if false;
+      allow create: if isSignedIn() &&
+        isValidId(inviteCode) &&
+        inviteCode.size() >= 12 &&
+        isValidProjectInvite(request.resource.data) &&
+        isParentProjectAdmin(request.resource.data.projectId) &&
+        request.resource.data.createdByUid == request.auth.uid;
+      allow update: if isSignedIn() &&
+        isParentProjectAdmin(resource.data.projectId) &&
+        isValidProjectInvite(request.resource.data) &&
+        request.resource.data.projectId == resource.data.projectId &&
+        request.resource.data.createdByUid == resource.data.createdByUid &&
+        request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isSignedIn() && isParentProjectAdmin(resource.data.projectId);
+    }
+
+    match /publicShares/{shareCode} {
+      allow get: if isValidId(shareCode) && shareCode.size() >= 16;
+      allow list: if false;
+      allow create: if isSignedIn() &&
+        isValidId(shareCode) &&
+        shareCode.size() >= 16 &&
+        isValidPublicShare(request.resource.data) &&
+        isParentProjectAdmin(request.resource.data.projectId);
+      allow update: if isSignedIn() &&
+        isParentProjectAdmin(resource.data.projectId) &&
+        isValidPublicShare(request.resource.data) &&
+        request.resource.data.projectId == resource.data.projectId;
+      allow delete: if isSignedIn() && isParentProjectAdmin(resource.data.projectId);
+    }
+
+    // Default deny for everything else
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
