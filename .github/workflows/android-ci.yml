@@ -51,6 +51,26 @@ jobs:
             echo "::warning::Could not pre-install $COMPILE_PLATFORM; the Android Gradle Plugin will try to download it."
           fi
 
+      - name: Placeholder google-services.json when the real one is absent (CI only, fake values)
+        # GoogleAuthHelper.kt uses R.string.default_web_client_id, which the google-services plugin
+        # generates from app/google-services.json. The file lives in AI Studio but not in this repo.
+        shell: bash
+        run: |
+          if [ -f app/google-services.json ]; then echo "Using committed app/google-services.json"; exit 0; fi
+          echo "::notice::app/google-services.json not in repo; writing a CI-only placeholder with fake values."
+          cat > app/google-services.json <<'EOF'
+          {
+            "project_info": {"project_number": "000000000000", "project_id": "ci-placeholder-project", "storage_bucket": "ci-placeholder-project.appspot.com"},
+            "client": [{
+              "client_info": {"mobilesdk_app_id": "1:000000000000:android:0000000000000000", "android_client_info": {"package_name": "com.aistudio.vortexresearcher.k9m4px"}},
+              "oauth_client": [{"client_id": "000000000000-ciplaceholder.apps.googleusercontent.com", "client_type": 3}],
+              "api_key": [{"current_key": "CI_PLACEHOLDER_NOT_A_REAL_KEY"}],
+              "services": {"appinvite_service": {"other_platform_oauth_client": [{"client_id": "000000000000-ciplaceholder.apps.googleusercontent.com", "client_type": 3}]}}
+            }],
+            "configuration_version": "1"
+          }
+          EOF
+
       - name: Create the debug keystore expected by build.gradle.kts (CI only, git-ignored)
         shell: bash
         run: |
