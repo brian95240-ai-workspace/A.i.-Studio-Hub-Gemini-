@@ -22,24 +22,82 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Local-only Android Keystore (AES-256-GCM) encrypted `.env` vault.
- * - Secrets never leave the device (never synced to Firestore, GitHub, Drive, or ZIP exports).
- * - Secret values are never logged.
- * - Supports discrete Auto-Fill resolution and per-entry AI Model permission enforcement.
+ * Pluggable AES-256-GCM cipher abstraction for [EncryptedEnvVaultStore].
+ * Production uses [AndroidKeystoreVaultCipher] backed by hardware/OS AndroidKeyStore;
+ * unit tests may supply a JVM AES-256-GCM cipher for deterministic round-trip verification.
  */
-class EncryptedEnvVaultStore(private val context: Context) {
+interface VaultCipher {
+    fun encrypt(plaintext: ByteArray): Pair<ByteArray, ByteArray>
+    fun decrypt(iv: ByteArray, ciphertext: ByteArray): ByteArray
+}
+
+class AndroidKeystoreVaultCipher(
+    private val keyAlias: String = DEFAULT_KEY_ALIAS
+) : VaultCipher {
+
+    companion object {
+        private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+        private const val DEFAULT_KEY_ALIAS = "vortex_env_vault_aes_gcm_v1"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val GCM_TAG_BITS = 128
+    }
+
+    private fun getOrCreateMasterKey(): SecretKey {
+        val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val existing = keyStore.getKey(keyAlias, null) as? SecretKey
+        if (existing != null) return existing
+
+        val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+        val spec = KeyGenParameterSpec.Builder(
+            keyAlias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build()
+        keyGenerator.init(spec)
+        return keyGenerator.generateKey()
+    }
+
+    override fun encrypt(plaintext: ByteArray): Pair<ByteArray, ByteArray> {
+        val key = getOrCreateMasterKey()
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, key)
+        val iv = cipher.iv
+        val ciphertext = cipher.doFinal(plaintext)
+        return iv to ciphertext
+    }
+
+    override fun decrypt(iv: ByteArray, ciphertext: ByteArray): ByteArray {
+        val key = getOrCreateMasterKey()
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+        return cipher.doFinal(ciphertext)
+    }
+}
+
+/**
+ * Local-only Android Keystore (AES-256-GCM) encrypted `.env` vault.
+ * - Secrets never leave the device (never synced to Firestore, GitHub, Drive, ZIP exports, or Android backups).
+ * - Secret values are never logged.
+ * - Supports discrete Auto-Fill resolution, just-in-time header/token lookup, and per-entry AI permissions.
+ */
+class EncryptedEnvVaultStore(
+    private val context: Context,
+    private val vaultCipher: VaultCipher = AndroidKeystoreVaultCipher(),
+    private val vaultFileOverride: File? = null
+) {
 
     companion object {
         private const val TAG = "EncryptedEnvVaultStore"
-        private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
-        private const val KEY_ALIAS = "vortex_env_vault_aes_gcm_v1"
-        private const val TRANSFORMATION = "AES/GCM/NoPadding"
-        private const val GCM_TAG_BITS = 128
-        private const val VAULT_FILENAME = "vortex_env_vault.enc"
+        const val VAULT_FILENAME = "vortex_env_vault.enc"
+        const val KEY_EXTERNAL_API_KEY = "EXTERNAL_API_KEY"
+        const val KEY_GITHUB_PAT = "GITHUB_PAT"
     }
 
     private val mutex = Mutex()
-    private val vaultFile: File by lazy { File(context.filesDir, VAULT_FILENAME) }
+    private val vaultFile: File by lazy { vaultFileOverride ?: File(context.filesDir, VAULT_FILENAME) }
 
     private val _entries = MutableStateFlow<List<EnvSecretEntry>>(emptyList())
     val entries: StateFlow<List<EnvSecretEntry>> = _entries.asStateFlow()
@@ -49,6 +107,113 @@ class EncryptedEnvVaultStore(private val context: Context) {
     }
 
     fun currentEntries(): List<EnvSecretEntry> = _entries.value
+
+    /**
+     * Just-in-time secret lookup by vault key name (case-insensitive).
+     * Never logs the returned value.
+     */
+    fun getSecretValue(vaultKeyRef: String): String? {
+        val clean = vaultKeyRef.trim()
+        if (clean.isBlank()) return null
+        return _entries.value
+            .firstOrNull { it.key.equals(clean, ignoreCase = true) }
+            ?.value
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Reads and decrypts directly from disk to verify persistence integrity (used during one-time migration).
+     */
+    suspend fun verifySecretPersistedOnDisk(key: String, expectedValue: String): Boolean =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val diskEntries = runCatching { readDecryptedEntriesSync() }.getOrNull() ?: return@withLock false
+                val found = diskEntries.firstOrNull { it.key.equals(key, ignoreCase = true) }
+                found != null && found.value == expectedValue
+            }
+        }
+
+    /**
+     * Persists a managed credential (e.g., GITHUB_PAT or EXTERNAL_API_KEY) directly into the encrypted vault
+     * with Human-Only AI protection and Discrete Auto-Fill enabled.
+     */
+    suspend fun upsertManagedCredential(
+        key: String,
+        value: String,
+        category: EnvSecretCategory,
+        target: EnvAutoFillTarget,
+        note: String,
+        preserveExistingIfPresent: Boolean = false
+    ): Result<List<EnvSecretEntry>> = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            runCatching {
+                val sanitizedKey = EnvFileCodec.sanitizeKey(key)
+                require(sanitizedKey.isNotBlank() && EnvFileCodec.isValidKey(sanitizedKey)) {
+                    "Invalid secret key name."
+                }
+                val trimmedVal = value.trim()
+                val updated = _entries.value.toMutableList()
+                val existingIdx = updated.indexOfFirst { it.key.equals(sanitizedKey, ignoreCase = true) }
+
+                if (existingIdx >= 0) {
+                    val existing = updated[existingIdx]
+                    if (preserveExistingIfPresent && existing.value.isNotBlank()) {
+                        // Already present in encrypted vault — keep existing vault secret untouched
+                        return@runCatching _entries.value
+                    }
+                    updated[existingIdx] = existing.copy(
+                        value = trimmedVal,
+                        autoFillEnabled = if (trimmedVal.isNotBlank()) true else existing.autoFillEnabled,
+                        autoFillTarget = if (existing.autoFillTarget == EnvAutoFillTarget.AUTO_DETECT) target else existing.autoFillTarget,
+                        updatedAtMillis = System.currentTimeMillis()
+                    )
+                } else {
+                    updated.add(
+                        EnvSecretEntry(
+                            key = sanitizedKey,
+                            value = trimmedVal,
+                            category = category,
+                            autoFillEnabled = trimmedVal.isNotBlank(),
+                            autoFillTarget = target,
+                            permissions = ModelSecretPermissions(noAccessHumanOnly = true),
+                            note = note,
+                            updatedAtMillis = System.currentTimeMillis()
+                        )
+                    )
+                }
+                val sorted = updated.sortedBy { it.key }
+                writeEncryptedEntriesSync(sorted)
+                _entries.value = sorted
+                sorted
+            }
+        }
+    }
+
+    /**
+     * Clears any credential value mapped to a managed target (e.g., when disconnecting GitHub).
+     */
+    suspend fun clearManagedCredentialTarget(target: EnvAutoFillTarget): Result<List<EnvSecretEntry>> =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                runCatching {
+                    val updated = _entries.value.map { entry ->
+                        if (entry.resolvedTarget() == target) {
+                            entry.copy(
+                                value = "",
+                                autoFillEnabled = false,
+                                updatedAtMillis = System.currentTimeMillis()
+                            )
+                        } else {
+                            entry
+                        }
+                    }
+                    writeEncryptedEntriesSync(updated)
+                    _entries.value = updated
+                    updated
+                }
+            }
+        }
 
     suspend fun upsertEntry(entry: EnvSecretEntry): Result<List<EnvSecretEntry>> =
         withContext(Dispatchers.IO) {
@@ -208,6 +373,15 @@ class EncryptedEnvVaultStore(private val context: Context) {
                         note = "Base URL for OpenRouter or custom OpenAI-compatible gateway"
                     ),
                     EnvSecretEntry(
+                        key = "MCP_AUTH_TOKEN",
+                        value = "",
+                        category = EnvSecretCategory.TOKEN,
+                        autoFillEnabled = false,
+                        autoFillTarget = EnvAutoFillTarget.MCP_AUTH_TOKEN,
+                        permissions = ModelSecretPermissions(noAccessHumanOnly = true),
+                        note = "Optional Bearer token for direct HTTPS MCP endpoints"
+                    ),
+                    EnvSecretEntry(
                         key = "SERVICE_USERNAME",
                         value = "",
                         category = EnvSecretCategory.LOGIN,
@@ -236,6 +410,10 @@ class EncryptedEnvVaultStore(private val context: Context) {
         }
     }
 
+    /**
+     * Plaintext `.env` export. Callers MUST gate this behind an explicit unencrypted-export
+     * confirmation dialog (off by default) before launching the system document picker.
+     */
     suspend fun exportEnvToUri(uri: Uri): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             val entriesSnapshot = _entries.value
@@ -303,6 +481,27 @@ class EncryptedEnvVaultStore(private val context: Context) {
             }
         }
 
+        // Also fall back to exact managed keys in vault even if user toggled auto-fill off for display,
+        // only when no auto-fill entry matched:
+        if (githubPat == null) {
+            val directGh = currentEntries.firstOrNull {
+                it.key.equals(KEY_GITHUB_PAT, ignoreCase = true) && it.value.isNotBlank()
+            }
+            if (directGh != null) {
+                githubPat = directGh.value.trim()
+                githubPatKey = directGh.key
+            }
+        }
+        if (routerKey == null) {
+            val directRouter = currentEntries.firstOrNull {
+                it.key.equals(KEY_EXTERNAL_API_KEY, ignoreCase = true) && it.value.isNotBlank()
+            }
+            if (directRouter != null) {
+                routerKey = directRouter.value.trim()
+                routerKeyName = directRouter.key
+            }
+        }
+
         return DiscreteAutoFillResolution(
             githubPat = githubPat,
             githubPatKeyName = githubPatKey,
@@ -344,31 +543,9 @@ class EncryptedEnvVaultStore(private val context: Context) {
         }.trim()
     }
 
-    private fun getOrCreateMasterKey(): SecretKey {
-        val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        val existing = keyStore.getKey(KEY_ALIAS, null) as? SecretKey
-        if (existing != null) return existing
-
-        val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .build()
-        keyGenerator.init(spec)
-        return keyGenerator.generateKey()
-    }
-
     private fun writeEncryptedEntriesSync(entries: List<EnvSecretEntry>) {
         val plaintext = EnvFileCodec.encodeEntriesJson(entries).toByteArray(Charsets.UTF_8)
-        val key = getOrCreateMasterKey()
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, key)
-        val iv = cipher.iv
-        val ciphertext = cipher.doFinal(plaintext)
+        val (iv, ciphertext) = vaultCipher.encrypt(plaintext)
 
         val envelope = JSONObject().apply {
             put("v", 1)
@@ -376,7 +553,8 @@ class EncryptedEnvVaultStore(private val context: Context) {
             put("ct", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
         }.toString()
 
-        val tempFile = File(context.filesDir, "$VAULT_FILENAME.tmp")
+        val parentDir = vaultFile.parentFile ?: context.filesDir
+        val tempFile = File(parentDir, "${vaultFile.name}.tmp")
         tempFile.writeText(envelope, Charsets.UTF_8)
         if (!tempFile.renameTo(vaultFile)) {
             vaultFile.writeText(envelope, Charsets.UTF_8)
@@ -391,10 +569,7 @@ class EncryptedEnvVaultStore(private val context: Context) {
             val envelope = JSONObject(raw)
             val iv = Base64.decode(envelope.getString("iv"), Base64.NO_WRAP)
             val ct = Base64.decode(envelope.getString("ct"), Base64.NO_WRAP)
-            val key = getOrCreateMasterKey()
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
-            val plaintext = String(cipher.doFinal(ct), Charsets.UTF_8)
+            val plaintext = String(vaultCipher.decrypt(iv, ct), Charsets.UTF_8)
             EnvFileCodec.decodeEntriesJson(plaintext)
         } catch (e: Exception) {
             Log.w(TAG, "Encrypted vault could not be decrypted; starting empty.")

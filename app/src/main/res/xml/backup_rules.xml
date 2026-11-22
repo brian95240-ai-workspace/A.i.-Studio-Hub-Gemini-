@@ -1,13 +1,17 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Legacy Auto Backup rules (API 24-30).
+   Excludes Jetpack DataStore, the AES-256-GCM encrypted .env vault, the Room local cache
+   database, and device-local MCP audit/result stores from cloud backup.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="file" path="datastore" />
+    <exclude domain="file" path="datastore/vortex_local_prefs.preferences_pb" />
+    <exclude domain="file" path="vortex_env_vault.enc" />
+    <exclude domain="file" path="vortex_env_vault.enc.tmp" />
+    <exclude domain="file" path="vortex_mcp_audit_log.json" />
+    <exclude domain="file" path="vortex_mcp_results.json" />
+    <exclude domain="database" path="vortex_local_cache.db" />
+    <exclude domain="database" path="vortex_local_cache.db-wal" />
+    <exclude domain="database" path="vortex_local_cache.db-shm" />
 </full-backup-content>

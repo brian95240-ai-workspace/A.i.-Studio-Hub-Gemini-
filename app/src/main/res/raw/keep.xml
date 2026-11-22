@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@xml/backup_rules,@xml/data_extraction_rules,@xml/file_paths,@string/firestore_database_id,@string/default_web_client_id,@font/jetbrains_mono,@font/plus_jakarta_sans,@font/space_grotesk" />

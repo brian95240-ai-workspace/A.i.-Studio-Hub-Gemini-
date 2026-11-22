@@ -13,6 +13,7 @@ import com.example.auth.GoogleDriveAuthManager
 import com.example.data.ai.AudioTranscriptionResult
 import com.example.data.ai.ExternalRouterApi
 import com.example.data.ai.PipelinePassFailureException
+import com.example.data.ai.SelfHostedHealthResult
 import com.example.data.ai.Stage0TriageResult
 import com.example.data.ai.VortexModelRouter
 import com.example.data.ai.VortexPipelineOrchestrator
@@ -30,6 +31,13 @@ import com.example.data.infra.ConnectorVisibility
 import com.example.data.infra.InfraConnectorProfile
 import com.example.data.infra.InfrastructureRegistryEngine
 import com.example.data.infra.InfrastructureRegistryState
+import com.example.data.infra.McpAuditLogEntry
+import com.example.data.infra.McpAuditLogStore
+import com.example.data.infra.McpCallPolicyDecision
+import com.example.data.infra.McpFullResultStore
+import com.example.data.infra.McpJsonRpcClient
+import com.example.data.infra.McpStoredResult
+import com.example.data.infra.McpToolCallOutcome
 import com.example.data.github.GitHubAuthMethod
 import com.example.data.github.GitHubDeviceCodeSession
 import com.example.data.github.GitHubGitSyncEngine
@@ -43,6 +51,7 @@ import com.example.data.local.LocalPreferencesStore
 import com.example.data.local.cache.VortexLocalDatabase
 import com.example.data.model.ChatTurn
 import com.example.data.model.ExportFileFormat
+import com.example.data.model.ExternalRouterType
 import com.example.data.model.GapVerdict
 import com.example.data.model.MetadataTagEngine
 import com.example.data.model.NoteCategory
@@ -63,8 +72,10 @@ import com.example.data.remote.VortexFirestoreRepository
 import com.example.data.security.DiscreteAutoFillResolution
 import com.example.data.security.EncryptedEnvVaultStore
 import com.example.data.security.EnvAutoFillTarget
+import com.example.data.security.EnvSecretCategory
 import com.example.data.security.EnvSecretEntry
 import com.example.data.security.ModelSecretPermissions
+import com.example.data.security.SecretVaultMigration
 import com.example.data.sync.ConflictResolutionStrategy
 import com.example.data.sync.DriveHeaderSyncState
 import com.example.data.sync.DrivePushReport
@@ -167,6 +178,9 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
     )
     private val prefsStore = LocalPreferencesStore(appContext)
     private val envVaultStore = EncryptedEnvVaultStore(appContext)
+    private val mcpResultStore = McpFullResultStore(appContext.filesDir)
+    private val mcpAuditLogStore = McpAuditLogStore(appContext.filesDir)
+    private val mcpClient = McpJsonRpcClient(mcpResultStore, mcpAuditLogStore)
     private val externalRouterApi = ExternalRouterApi()
     private val modelRouter = VortexModelRouter(externalRouterApi)
     private val orchestrator = VortexPipelineOrchestrator(modelRouter)
@@ -195,13 +209,23 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
             envVaultStore.resolveDiscreteAutoFill()
         )
 
+    private val _mcpAuditLog = MutableStateFlow<List<McpAuditLogEntry>>(mcpAuditLogStore.loadAll())
+    val mcpAuditLog: StateFlow<List<McpAuditLogEntry>> = _mcpAuditLog.asStateFlow()
+
+    private val _selfHostedHealthResult = MutableStateFlow<SelfHostedHealthResult?>(null)
+    val selfHostedHealthResult: StateFlow<SelfHostedHealthResult?> = _selfHostedHealthResult.asStateFlow()
+
+    private val _checkingSelfHostedHealth = MutableStateFlow(false)
+    val checkingSelfHostedHealth: StateFlow<Boolean> = _checkingSelfHostedHealth.asStateFlow()
+
     private val _resolvingConflict = MutableStateFlow(false)
     val resolvingConflict: StateFlow<Boolean> = _resolvingConflict.asStateFlow()
 
     val routingPreferences: StateFlow<RoutingPreferences> = combine(
         prefsStore.routingPreferences,
-        envAutoFillResolution
-    ) { prefs, autoFill ->
+        envAutoFillResolution,
+        envSecrets
+    ) { prefs, autoFill, _ ->
         applyDiscreteAutoFillToPrefs(prefs, autoFill)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), RoutingPreferences())
 
@@ -853,6 +877,13 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
+        // One-time verified migration of legacy plaintext DataStore secrets into AES-256-GCM vault
+        viewModelScope.launch {
+            val report = SecretVaultMigration.migrateIfNeeded(prefsStore, envVaultStore)
+            if (report.errorMessage != null) {
+                _uiState.update { it.copy(errorMessage = "Secret vault migration note: ${report.errorMessage}") }
+            }
+        }
         val uid = FirebaseAuth.getInstance().currentUser?.uid.orEmpty()
         currentUidFlow.value = uid
         if (uid.isNotBlank()) {
@@ -1357,7 +1388,7 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                     .map { it.detectedLanguage }
                     .filter { it !in listOf("Markdown", "Plain Text", "Text") }
                     .distinct()
-                val envPolicy = buildAgentRuntimeContext()
+                val envPolicy = buildAgentRuntimeContext(stageId = null)
 
                 val output = orchestrator.runFromPass(
                     startPass = startPass,
@@ -1371,6 +1402,7 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                     prefs = prefs,
                     detectedLanguages = detectedLangs,
                     envPolicyContext = envPolicy,
+                    stageContextProvider = { stageId -> buildAgentRuntimeContext(stageId) },
                     onProgress = { stages, triage ->
                         if (triage != null) lastStage0Triage = triage
                         _uiState.update { cur ->
@@ -1388,7 +1420,10 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                 val existing = activeProject()
                 val finalRoot = state.draftRootFolder.trim().ifBlank { output.triage.suggestedRootFolder }
                 val allSources = output.stages.flatMap { it.sources }.distinctBy { it.uri }
-                val primaryModel = output.stages.firstOrNull { it.stageNumber == 4 }?.modelUsed.orEmpty()
+                val stage4 = output.stages.firstOrNull { it.stageNumber == 4 }
+                val primaryModel = stage4?.modelUsed.orEmpty()
+                val primaryLane = stage4?.responseLane.orEmpty()
+                val primaryLatency = stage4?.responseLatencySeconds
                 val voiceResult = state.lastVoiceNoteResult
                 val initialTurns = listOf(
                     MetadataTagEngine.tagChatTurn(
@@ -1409,6 +1444,8 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                             role = "ASSISTANT",
                             content = output.chatAnswer,
                             modelUsed = primaryModel,
+                            responseLane = primaryLane,
+                            responseLatencySeconds = primaryLatency,
                             sources = allSources,
                             timestampMillis = System.currentTimeMillis()
                         ),
@@ -1548,14 +1585,23 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
                 val prefs = resolveEffectiveRoutingPreferences()
-                val envPolicy = envVaultStore.buildAuthorizedModelPolicySummary()
-                val result = orchestrator.answerChatFollowUp(
-                    project = project,
-                    history = existingHistory,
-                    followUpQuestion = question,
-                    prefs = prefs,
-                    envPolicyContext = envPolicy
-                )
+                val result = if (prefs.externalEnabled &&
+                    prefs.externalRouterType == ExternalRouterType.SELF_HOSTED_TEXT
+                ) {
+                    modelRouter.callSelfHostedDirect(
+                        userPrompt = question,
+                        prefs = prefs
+                    ).getOrThrow()
+                } else {
+                    val envPolicy = buildAgentRuntimeContext(stageId = null)
+                    orchestrator.answerChatFollowUp(
+                        project = project,
+                        history = existingHistory,
+                        followUpQuestion = question,
+                        prefs = prefs,
+                        envPolicyContext = envPolicy
+                    )
+                }
 
                 val now = System.currentTimeMillis()
                 val taggedUserTurn = MetadataTagEngine.tagChatTurn(
@@ -1574,6 +1620,8 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                         role = "ASSISTANT",
                         content = result.text,
                         modelUsed = result.modelUsed,
+                        responseLane = result.responseLane,
+                        responseLatencySeconds = result.latencySeconds,
                         sources = result.sources,
                         timestampMillis = now + 1L
                     ),
@@ -2077,13 +2125,27 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
 
-                val responseText = externalRouterApi.chatCompletion(
-                    baseUrl = baseUrl,
-                    apiKey = apiKey,
-                    modelId = cleanModelId,
-                    systemPrompt = sysPrompt,
-                    userPrompt = packet
-                ).getOrThrow()
+                val responseText = if (prefs.externalRouterType == ExternalRouterType.SELF_HOSTED_TEXT) {
+                    val composed = ExternalRouterApi.composeSelfHostedPrompt(
+                        userPrompt = packet.take(ExternalRouterApi.SELF_HOSTED_MAX_PROMPT_CHARS),
+                        approvedSummary = prefs.selfHostedApprovedSummary
+                    ).take(ExternalRouterApi.SELF_HOSTED_MAX_PROMPT_CHARS)
+                    externalRouterApi.selfHostedQuery(
+                        baseUrl = baseUrl,
+                        bearerToken = apiKey,
+                        prompt = composed
+                    ).getOrThrow().let { res ->
+                        "**Self-Hosted Router** · `lane=${res.lane}` · `model=${res.model}`\n\n${res.response}"
+                    }
+                } else {
+                    externalRouterApi.chatCompletion(
+                        baseUrl = baseUrl,
+                        apiKey = apiKey,
+                        modelId = cleanModelId,
+                        systemPrompt = sysPrompt,
+                        userPrompt = packet
+                    ).getOrThrow()
+                }
 
                 val safeFolder = modelFolder.trim().ifBlank { "External-AI" }
                 ensureFolderPersisted(project, safeFolder)
@@ -2430,8 +2492,55 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
 
     fun saveRoutingPreferences(updated: RoutingPreferences) {
         viewModelScope.launch {
-            prefsStore.saveRoutingPreferences(updated)
-            _uiState.update { it.copy(bannerMessage = "Saved Model Router & GitHub configuration locally.") }
+            val externalKeyRef = updated.externalAuthVaultRef
+                .trim()
+                .ifBlank { EncryptedEnvVaultStore.KEY_EXTERNAL_API_KEY }
+            val trimmedExtKey = updated.externalApiKey.trim()
+            if (trimmedExtKey.isNotBlank()) {
+                envVaultStore.upsertManagedCredential(
+                    key = externalKeyRef,
+                    value = trimmedExtKey,
+                    category = EnvSecretCategory.API_KEY,
+                    target = EnvAutoFillTarget.EXTERNAL_ROUTER_API_KEY,
+                    note = "External Router Bearer token (stored in AES-256-GCM vault)"
+                )
+            } else {
+                envVaultStore.clearManagedCredentialTarget(EnvAutoFillTarget.EXTERNAL_ROUTER_API_KEY)
+            }
+
+            val trimmedPat = updated.githubPat.trim()
+            if (trimmedPat.isNotBlank()) {
+                envVaultStore.upsertManagedCredential(
+                    key = EncryptedEnvVaultStore.KEY_GITHUB_PAT,
+                    value = trimmedPat,
+                    category = EnvSecretCategory.TOKEN,
+                    target = EnvAutoFillTarget.GITHUB_PAT,
+                    note = "GitHub access token (stored in AES-256-GCM vault)"
+                )
+            } else {
+                envVaultStore.clearManagedCredentialTarget(EnvAutoFillTarget.GITHUB_PAT)
+            }
+
+            // Persist strictly non-secret fields to DataStore
+            prefsStore.saveRoutingPreferences(
+                updated.copy(
+                    externalAuthVaultRef = externalKeyRef,
+                    externalApiKey = "",
+                    githubPat = ""
+                )
+            )
+            _uiState.update { it.copy(bannerMessage = "Saved settings locally (credentials encrypted in AES-256-GCM vault).") }
+        }
+    }
+
+    fun checkSelfHostedRouterHealth(baseUrl: String) {
+        if (_checkingSelfHostedHealth.value) return
+        viewModelScope.launch {
+            _checkingSelfHostedHealth.value = true
+            val res = externalRouterApi.selfHostedHealth(baseUrl)
+            _selfHostedHealthResult.value = res
+            _checkingSelfHostedHealth.value = false
+            _uiState.update { it.copy(bannerMessage = "Self-Hosted /health: ${res.summary}") }
         }
     }
 
@@ -2454,14 +2563,20 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             githubAuthManager.verifyAccessToken(pat, GitHubAuthMethod.PERSONAL_ACCESS_TOKEN)
                 .onSuccess { profile ->
-                    prefsStore.saveGitHubCredentials(
-                        token = pat.trim(),
+                    envVaultStore.upsertManagedCredential(
+                        key = EncryptedEnvVaultStore.KEY_GITHUB_PAT,
+                        value = pat.trim(),
+                        category = EnvSecretCategory.TOKEN,
+                        target = EnvAutoFillTarget.GITHUB_PAT,
+                        note = "GitHub PAT verified for @${profile.login}"
+                    )
+                    prefsStore.saveGitHubSessionMetadata(
                         username = profile.login,
                         authMethodWire = GitHubAuthMethod.PERSONAL_ACCESS_TOKEN.wire
                     )
                     onVerified(profile.login)
                     _githubLastError.value = null
-                    _uiState.update { it.copy(bannerMessage = "Connected GitHub account @${profile.login}.") }
+                    _uiState.update { it.copy(bannerMessage = "Connected GitHub account @${profile.login} (token encrypted in vault).") }
                     refreshGitHubRepositories()
                 }
                 .onFailure { err ->
@@ -2493,8 +2608,14 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                                 accessToken,
                                 GitHubAuthMethod.OAUTH_DEVICE_FLOW
                             ).getOrThrow()
-                            prefsStore.saveGitHubCredentials(
-                                token = accessToken,
+                            envVaultStore.upsertManagedCredential(
+                                key = EncryptedEnvVaultStore.KEY_GITHUB_PAT,
+                                value = accessToken.trim(),
+                                category = EnvSecretCategory.TOKEN,
+                                target = EnvAutoFillTarget.GITHUB_PAT,
+                                note = "GitHub OAuth Device token for @${profile.login}"
+                            )
+                            prefsStore.saveGitHubSessionMetadata(
                                 username = profile.login,
                                 authMethodWire = GitHubAuthMethod.OAUTH_DEVICE_FLOW.wire,
                                 oauthClientId = cleanId
@@ -2503,7 +2624,7 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                                 it.copy(
                                     githubDeviceSession = null,
                                     githubDevicePolling = false,
-                                    bannerMessage = "Authenticated with GitHub OAuth as @${profile.login}!"
+                                    bannerMessage = "Authenticated with GitHub OAuth as @${profile.login} (token encrypted in vault)!"
                                 )
                             }
                             refreshGitHubRepositories()
@@ -2540,6 +2661,7 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
         _githubLiveProgress.value = null
         _githubLastError.value = null
         viewModelScope.launch {
+            envVaultStore.clearManagedCredentialTarget(EnvAutoFillTarget.GITHUB_PAT)
             prefsStore.clearGitHubCredentials()
             _uiState.update {
                 it.copy(
@@ -2547,7 +2669,7 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                     lastGitHubReport = null,
                     githubDeviceSession = null,
                     githubDevicePolling = false,
-                    bannerMessage = "Disconnected GitHub account."
+                    bannerMessage = "Disconnected GitHub account and cleared encrypted token."
                 )
             }
         }
@@ -3194,10 +3316,15 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
         base: RoutingPreferences,
         autoFill: DiscreteAutoFillResolution
     ): RoutingPreferences {
+        val vaultRefKey = envVaultStore.getSecretValue(base.externalAuthVaultRef)
+        val resolvedExtKey = vaultRefKey ?: autoFill.externalRouterApiKey ?: ""
+        val resolvedPat = autoFill.githubPat
+            ?: envVaultStore.getSecretValue(EncryptedEnvVaultStore.KEY_GITHUB_PAT)
+            ?: ""
         return base.copy(
-            githubPat = autoFill.githubPat ?: base.githubPat,
+            githubPat = resolvedPat,
             githubOAuthClientId = autoFill.githubOAuthClientId ?: base.githubOAuthClientId,
-            externalApiKey = autoFill.externalRouterApiKey ?: base.externalApiKey,
+            externalApiKey = resolvedExtKey,
             externalBaseUrl = autoFill.externalRouterBaseUrl ?: base.externalBaseUrl,
             externalEnabled = if (!autoFill.externalRouterApiKey.isNullOrBlank()) true else base.externalEnabled
         )
@@ -3321,8 +3448,9 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
         val current = prefsStore.getCurrentRoutingPreferences()
         var applied = 0
         var updated = current
+        // Secrets stay exclusively in EncryptedEnvVaultStore; only non-secret routing metadata is persisted to DataStore.
         if (!resolution.githubPat.isNullOrBlank()) {
-            updated = updated.copy(githubPat = resolution.githubPat, githubAuthMethod = "PAT")
+            updated = updated.copy(githubAuthMethod = "PAT")
             applied++
         }
         if (!resolution.githubOAuthClientId.isNullOrBlank()) {
@@ -3330,7 +3458,10 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
             applied++
         }
         if (!resolution.externalRouterApiKey.isNullOrBlank()) {
-            updated = updated.copy(externalApiKey = resolution.externalRouterApiKey, externalEnabled = true)
+            updated = updated.copy(
+                externalEnabled = true,
+                externalAuthVaultRef = resolution.externalRouterApiKeyName ?: current.externalAuthVaultRef
+            )
             applied++
         }
         if (!resolution.externalRouterBaseUrl.isNullOrBlank()) {
@@ -3338,7 +3469,7 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
             applied++
         }
         if (applied > 0) {
-            prefsStore.saveRoutingPreferences(updated)
+            prefsStore.saveRoutingPreferences(updated.copy(externalApiKey = "", githubPat = ""))
         }
         return applied
     }
@@ -3597,21 +3728,33 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Unified runtime context assembler ("greasing the gears"):
-     * Combines Authorized .env Policy + UTC<->Local Temporal Envelope + Non-Secret Infra/MCP capabilities
-     * in a single pass with zero leakage of PRIVATE_SOLO URLs or raw secrets.
+     * Unified runtime context assembler:
+     * Combines Authorized .env Policy + UTC<->Local Temporal Envelope + stage-scoped,
+     * budget-capped ONLINE allowlisted MCP tools with zero leakage of PRIVATE_SOLO names/URLs or secrets.
      */
-    private fun buildAgentRuntimeContext(): String = listOf(
+    private fun buildAgentRuntimeContext(stageId: Int? = null): String = listOf(
         envVaultStore.buildAuthorizedModelPolicySummary(),
-        InfrastructureRegistryEngine.buildAuthorizedAgentInfraContext(infraRegistryState.value)
+        InfrastructureRegistryEngine.buildAuthorizedAgentInfraContext(
+            state = infraRegistryState.value,
+            currentStageId = stageId
+        )
     ).filter { it.isNotBlank() }.joinToString("\n\n")
 
     fun updateInfraConnector(updated: InfraConnectorProfile) {
         viewModelScope.launch {
             val current = infraRegistryState.value
-            val nextList = current.connectors.map { if (it.id == updated.id) updated else it }
+            val sanitizedVisibility = if (updated.visibility in updated.allowedVisibilities()) {
+                updated.visibility
+            } else {
+                ConnectorVisibility.PRIVATE_SOLO
+            }
+            val safeUpdated = updated.copy(
+                visibility = sanitizedVisibility,
+                requirePerCallConfirmation = if (updated.id == InfraConnectorProfile.ID_VPS_ACCESS) true else updated.requirePerCallConfirmation
+            )
+            val nextList = current.connectors.map { if (it.id == safeUpdated.id) safeUpdated else it }
             prefsStore.saveInfrastructureRegistry(current.copy(connectors = nextList))
-            _uiState.update { it.copy(bannerMessage = "Saved ${updated.name} (${updated.visibility.shortBadge}) locally.") }
+            _uiState.update { it.copy(bannerMessage = "Saved ${safeUpdated.name} (${safeUpdated.visibility.shortBadge}) locally.") }
         }
     }
 
@@ -3630,14 +3773,15 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                 providerLabel = if (kind.isStorageTier) "Custom BYO Database / Storage" else "Custom BYO MCP Server",
                 kind = kind,
                 templateKey = "custom_${System.currentTimeMillis()}",
-                description = "User-registered universal connector (stored strictly on device unless explicitly shared).",
+                description = "User-registered universal connector (stored strictly on device unless explicitly shared). Confirm live tools via tools/list when online.",
+                enabled = true,
                 visibility = visibility,
                 readOnlyEnforced = visibility == ConnectorVisibility.SANDBOXED_READ_ONLY,
                 status = if (cleanUrl.isNotBlank()) ConnectorStatus.CONFIGURED else ConnectorStatus.STANDBY,
                 useGatewayProxy = false,
                 endpointUrl = cleanUrl,
                 vaultSecretKeyRef = secretRef.trim(),
-                capabilities = if (kind.isStorageTier) listOf("query.read", "query.write") else listOf("mcp.tools_list", "mcp.tools_call"),
+                capabilities = if (kind.isStorageTier) listOf("query.read", "query.write") else emptyList(),
                 isCustom = true
             )
             prefsStore.saveInfrastructureRegistry(current.copy(connectors = current.connectors + profile))
@@ -3649,6 +3793,7 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val current = infraRegistryState.value
             val nextList = current.connectors.filterNot { it.id == connectorId && it.isCustom }
+            mcpClient.clearSession(connectorId)
             prefsStore.saveInfrastructureRegistry(current.copy(connectors = nextList))
             _uiState.update { it.copy(bannerMessage = "Removed custom connector.") }
         }
@@ -3657,7 +3802,9 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
     fun updateInfraGatewayAndTime(
         gatewayBaseUrl: String,
         timezoneId: String,
-        attachTimeContext: Boolean
+        attachTimeContext: Boolean,
+        agentContextTokenBudget: Int = infraRegistryState.value.agentContextTokenBudget,
+        mcpResultCharCap: Int = infraRegistryState.value.mcpResultCharCap
     ) {
         viewModelScope.launch {
             val current = infraRegistryState.value
@@ -3665,10 +3812,12 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                 current.copy(
                     gatewayBaseUrl = gatewayBaseUrl.trim(),
                     localTimezoneId = timezoneId.trim().ifBlank { current.localTimezoneId },
-                    attachTimeContextToAgents = attachTimeContext
+                    attachTimeContextToAgents = attachTimeContext,
+                    agentContextTokenBudget = agentContextTokenBudget.coerceIn(40, 1000),
+                    mcpResultCharCap = mcpResultCharCap.coerceIn(250, 12_000)
                 )
             )
-            _uiState.update { it.copy(bannerMessage = "Saved Gateway & UTC↔Local Time Sync settings locally.") }
+            _uiState.update { it.copy(bannerMessage = "Saved Gateway, Time Sync & Governance settings locally.") }
         }
     }
 
@@ -3681,7 +3830,11 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
             }
             prefsStore.saveInfrastructureRegistry(current.copy(connectors = probingList))
 
-            val result = InfrastructureRegistryEngine.probeConnector(target, current.gatewayBaseUrl)
+            val result = InfrastructureRegistryEngine.probeConnector(
+                profile = target,
+                gatewayBaseUrl = current.gatewayBaseUrl,
+                secretResolver = { keyRef -> envVaultStore.getSecretValue(keyRef) }
+            )
             val latest = infraRegistryState.value
             val updatedList = latest.connectors.map {
                 if (it.id == connectorId) {
@@ -3695,6 +3848,117 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
             prefsStore.saveInfrastructureRegistry(latest.copy(connectors = updatedList))
             _uiState.update { it.copy(bannerMessage = "${target.name}: ${result.summary}") }
         }
+    }
+
+    fun syncMcpToolsList(connectorId: String) {
+        viewModelScope.launch {
+            val current = infraRegistryState.value
+            val target = current.connectors.firstOrNull { it.id == connectorId } ?: return@launch
+            val probingList = current.connectors.map {
+                if (it.id == connectorId) it.copy(status = ConnectorStatus.PROBING, lastProbeMessage = "Initializing MCP session & fetching tools/list…") else it
+            }
+            prefsStore.saveInfrastructureRegistry(current.copy(connectors = probingList))
+
+            val resolver: (String) -> String? = { ref -> envVaultStore.getSecretValue(ref) }
+            val initRes = mcpClient.initialize(target, current.gatewayBaseUrl, resolver)
+            if (initRes.authRequired) {
+                saveConnectorStatus(connectorId, ConnectorStatus.AUTH_REQUIRED, initRes.errorMessage ?: "Auth Required.")
+                _uiState.update { it.copy(bannerMessage = "${target.name}: Auth Required during MCP initialize.") }
+                return@launch
+            }
+            val listRes = mcpClient.listTools(target, current.gatewayBaseUrl, resolver)
+            val latest = infraRegistryState.value
+            if (listRes.authRequired) {
+                saveConnectorStatus(connectorId, ConnectorStatus.AUTH_REQUIRED, listRes.errorMessage ?: "Auth Required.")
+                _uiState.update { it.copy(bannerMessage = "${target.name}: Auth Required during tools/list.") }
+                return@launch
+            }
+            if (!listRes.success) {
+                saveConnectorStatus(
+                    connectorId,
+                    ConnectorStatus.UNREACHABLE,
+                    listRes.errorMessage ?: initRes.errorMessage ?: "MCP tools/list unreachable."
+                )
+                _uiState.update { it.copy(errorMessage = "${target.name}: ${listRes.errorMessage ?: "tools/list failed"}") }
+                return@launch
+            }
+            val liveNames = listRes.tools.map { it.name }.toSet()
+            val updatedList = latest.connectors.map { c ->
+                if (c.id == connectorId) {
+                    val prunedAllowlist = c.allowedToolNames.intersect(liveNames)
+                    val prunedUserRo = c.userMarkedReadOnlyTools.intersect(liveNames)
+                    val updatedProfile = c.copy(
+                        status = ConnectorStatus.ONLINE,
+                        discoveredTools = listRes.tools,
+                        allowedToolNames = prunedAllowlist,
+                        userMarkedReadOnlyTools = prunedUserRo,
+                        lastProbeAtMillis = System.currentTimeMillis(),
+                        lastProbeMessage = "MCP Online · ${listRes.tools.size} tool(s) discovered" +
+                            (initRes.sessionId?.let { " · Session active" } ?: "")
+                    )
+                    updatedProfile
+                } else c
+            }
+            prefsStore.saveInfrastructureRegistry(latest.copy(connectors = updatedList))
+            _uiState.update {
+                it.copy(bannerMessage = "${target.name}: synced ${listRes.tools.size} tool(s) from live tools/list.")
+            }
+        }
+    }
+
+    fun evaluateMcpToolCall(connectorId: String, toolName: String): McpCallPolicyDecision? {
+        val profile = infraRegistryState.value.connectors.firstOrNull { it.id == connectorId } ?: return null
+        return mcpClient.evaluateToolCallPolicy(profile, toolName)
+    }
+
+    fun invokeMcpTool(
+        connectorId: String,
+        toolName: String,
+        argumentsJson: String,
+        confirmedByUser: Boolean,
+        onOutcome: (McpToolCallOutcome) -> Unit
+    ) {
+        viewModelScope.launch {
+            val state = infraRegistryState.value
+            val profile = state.connectors.firstOrNull { it.id == connectorId } ?: return@launch
+            val outcome = mcpClient.callTool(
+                profile = profile,
+                gatewayBaseUrl = state.gatewayBaseUrl,
+                toolName = toolName,
+                argumentsJson = argumentsJson,
+                charCap = state.mcpResultCharCap,
+                confirmedByUser = confirmedByUser,
+                secretResolver = { ref -> envVaultStore.getSecretValue(ref) }
+            )
+            _mcpAuditLog.value = mcpAuditLogStore.loadAll()
+            if (outcome.authRequired) {
+                saveConnectorStatus(connectorId, ConnectorStatus.AUTH_REQUIRED, outcome.errorMessage ?: "Auth Required.")
+            }
+            onOutcome(outcome)
+        }
+    }
+
+    fun lookupMcpStoredResult(refId: String): McpStoredResult? = mcpResultStore.getByRefId(refId)
+
+    fun clearMcpAuditLog() {
+        mcpAuditLogStore.clear()
+        mcpResultStore.clear()
+        _mcpAuditLog.value = emptyList()
+        _uiState.update { it.copy(bannerMessage = "Cleared local MCP audit log and cached tool outputs.") }
+    }
+
+    private suspend fun saveConnectorStatus(connectorId: String, status: ConnectorStatus, message: String) {
+        val latest = infraRegistryState.value
+        val updatedList = latest.connectors.map {
+            if (it.id == connectorId) {
+                it.copy(
+                    status = status,
+                    lastProbeMessage = message,
+                    lastProbeAtMillis = System.currentTimeMillis()
+                )
+            } else it
+        }
+        prefsStore.saveInfrastructureRegistry(latest.copy(connectors = updatedList))
     }
 
     fun mirrorNextStepsDocToProjectAndGitHub() {

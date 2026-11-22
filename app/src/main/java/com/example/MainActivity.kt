@@ -285,6 +285,9 @@ private fun AuthenticatedVortexWorkspace(
     val envSecrets by viewModel.envSecrets.collectAsStateWithLifecycle()
     val envAutoFillResolution by viewModel.envAutoFillResolution.collectAsStateWithLifecycle()
     val infraRegistryState by viewModel.infraRegistryState.collectAsStateWithLifecycle()
+    val mcpAuditLog by viewModel.mcpAuditLog.collectAsStateWithLifecycle()
+    val selfHostedHealthResult by viewModel.selfHostedHealthResult.collectAsStateWithLifecycle()
+    val checkingSelfHostedHealth by viewModel.checkingSelfHostedHealth.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     val navController = rememberNavController()
@@ -659,6 +662,9 @@ private fun AuthenticatedVortexWorkspace(
             currentPrefs = routingPrefs,
             envSecretCount = envSecrets.size,
             envAutoFill = envAutoFillResolution,
+            selfHostedHealthResult = selfHostedHealthResult,
+            checkingSelfHostedHealth = checkingSelfHostedHealth,
+            onCheckSelfHostedHealth = viewModel::checkSelfHostedRouterHealth,
             onOpenEnvVault = {
                 showRouterSheet = false
                 showEnvVaultSheet = true
@@ -690,11 +696,17 @@ private fun AuthenticatedVortexWorkspace(
         InfrastructureHubSheet(
             state = infraRegistryState,
             envSecretCount = envSecrets.size,
+            mcpAuditLog = mcpAuditLog,
             onDismiss = { showInfraHubSheet = false },
             onUpdateConnector = viewModel::updateInfraConnector,
             onAddCustomConnector = viewModel::addCustomInfraConnector,
             onRemoveCustomConnector = viewModel::removeCustomInfraConnector,
             onProbeConnector = viewModel::probeInfraConnector,
+            onSyncMcpTools = viewModel::syncMcpToolsList,
+            onEvaluateMcpCall = viewModel::evaluateMcpToolCall,
+            onInvokeMcpTool = viewModel::invokeMcpTool,
+            onLookupMcpResult = viewModel::lookupMcpStoredResult,
+            onClearMcpAuditLog = viewModel::clearMcpAuditLog,
             onUpdateGatewayAndTime = viewModel::updateInfraGatewayAndTime,
             onOpenEnvVault = {
                 showInfraHubSheet = false

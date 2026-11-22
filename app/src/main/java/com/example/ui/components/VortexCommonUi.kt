@@ -205,6 +205,18 @@ fun StagePipelineCard(
                                 accentColor = if (stage.modelUsed.contains("argon")) BridgeAmber
                                 else MaterialTheme.colorScheme.primary
                             )
+                            if (stage.responseLane.isNotBlank()) {
+                                TelemetryPill(
+                                    text = "lane: ${stage.responseLane}",
+                                    accentColor = VerifiedEmerald
+                                )
+                            }
+                            stage.responseLatencySeconds?.let { sec ->
+                                TelemetryPill(
+                                    text = String.format(java.util.Locale.US, "%.2fs", sec),
+                                    accentColor = MaterialTheme.colorScheme.tertiary
+                                )
+                            }
                             if (stage.sources.isNotEmpty()) {
                                 TelemetryPill(
                                     text = "${stage.sources.size} sources",

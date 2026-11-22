@@ -106,6 +106,7 @@ fun EnvSecretsVaultSheet(
     var viewMode by remember { mutableStateOf("TEMPLATE") }
     var permissionsDialogKey by remember { mutableStateOf<String?>(null) }
     var showFileTools by remember { mutableStateOf(entries.isEmpty()) }
+    var showPlaintextExportConfirm by remember { mutableStateOf(false) }
 
     val importEnvLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -275,12 +276,12 @@ fun EnvSecretsVaultSheet(
                                     Text("Create Template")
                                 }
                                 OutlinedButton(
-                                    onClick = { exportEnvLauncher.launch(".env") },
+                                    onClick = { showPlaintextExportConfirm = true },
                                     modifier = Modifier.testTag("env_export_file_button")
                                 ) {
                                     Icon(Icons.Outlined.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("Export .env")
+                                    Text("Export .env (Plaintext)")
                                 }
                             }
 
@@ -472,6 +473,67 @@ fun EnvSecretsVaultSheet(
                 onDismiss = { permissionsDialogKey = null }
             )
         }
+    }
+
+    if (showPlaintextExportConfirm) {
+        var acknowledgedPlaintextRisk by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { showPlaintextExportConfirm = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            title = {
+                Text(
+                    text = "Warning: Unencrypted Plaintext Export",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.error
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Exporting .env writes all ${entries.size} vaulted credential(s) as UNENCRYPTED PLAINTEXT to the file destination you pick. Any app or cloud sync folder with access to that file will be able to read your tokens.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { acknowledgedPlaintextRisk = !acknowledgedPlaintextRisk },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = acknowledgedPlaintextRisk,
+                            onCheckedChange = { acknowledgedPlaintextRisk = it },
+                            modifier = Modifier.testTag("env_export_plaintext_ack_checkbox")
+                        )
+                        Text(
+                            text = "I understand this exported .env file is unencrypted plaintext and will protect or delete it after use.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPlaintextExportConfirm = false
+                        exportEnvLauncher.launch(".env")
+                    },
+                    enabled = acknowledgedPlaintextRisk,
+                    modifier = Modifier.testTag("env_export_plaintext_confirm_btn")
+                ) {
+                    Text("Export Plaintext .env")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showPlaintextExportConfirm = false },
+                    modifier = Modifier.testTag("env_export_plaintext_cancel_btn")
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

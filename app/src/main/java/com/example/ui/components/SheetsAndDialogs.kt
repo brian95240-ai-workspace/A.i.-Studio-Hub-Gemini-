@@ -54,7 +54,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import com.example.R
+import com.example.data.ai.ExternalRouterApi
+import com.example.data.ai.SelfHostedHealthResult
+import com.example.data.model.ExternalRouterType
 import com.example.data.model.ProjectInvite
 import com.example.data.model.ResearchProject
 import com.example.data.model.RoutingMode
@@ -63,6 +68,7 @@ import com.example.data.model.ScaffoldingBlueprint
 import com.example.data.model.TeamRole
 import com.example.data.security.DiscreteAutoFillResolution
 import com.example.ui.theme.BridgeAmber
+import com.example.ui.theme.CrimsonError
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.VerifiedEmerald
 
@@ -72,6 +78,9 @@ fun ModelRouterAndGitHubSheet(
     currentPrefs: RoutingPreferences,
     envSecretCount: Int = 0,
     envAutoFill: DiscreteAutoFillResolution = DiscreteAutoFillResolution(),
+    selfHostedHealthResult: SelfHostedHealthResult? = null,
+    checkingSelfHostedHealth: Boolean = false,
+    onCheckSelfHostedHealth: (String) -> Unit = {},
     onOpenEnvVault: () -> Unit = {},
     onDismiss: () -> Unit,
     onSave: (RoutingPreferences) -> Unit,
@@ -85,8 +94,21 @@ fun ModelRouterAndGitHubSheet(
     var routingMode by remember { mutableStateOf(currentPrefs.routingMode) }
     var threshold by remember { mutableIntStateOf(currentPrefs.escalationThreshold) }
     var externalEnabled by remember { mutableStateOf(currentPrefs.externalEnabled) }
+    var externalRouterType by remember(currentPrefs.externalRouterType) {
+        mutableStateOf(currentPrefs.externalRouterType)
+    }
     var externalBaseUrl by remember(currentPrefs.externalBaseUrl) { mutableStateOf(currentPrefs.externalBaseUrl) }
+    var externalAuthVaultRef by remember(currentPrefs.externalAuthVaultRef) {
+        mutableStateOf(currentPrefs.externalAuthVaultRef.ifBlank { "EXTERNAL_API_KEY" })
+    }
     var externalApiKey by remember(currentPrefs.externalApiKey) { mutableStateOf(currentPrefs.externalApiKey) }
+    var selfHostedIncludeGrounding by remember(currentPrefs.selfHostedIncludeGrounding) {
+        mutableStateOf(currentPrefs.selfHostedIncludeGrounding)
+    }
+    var selfHostedApprovedSummary by remember(currentPrefs.selfHostedApprovedSummary) {
+        mutableStateOf(currentPrefs.selfHostedApprovedSummary)
+    }
+    var showPayloadPreview by remember { mutableStateOf(false) }
     var domainMatrix by remember(currentPrefs.domainModelMatrix) { mutableStateOf(currentPrefs.domainModelMatrix) }
     var githubPat by remember(currentPrefs.githubPat) { mutableStateOf(currentPrefs.githubPat) }
     var githubUser by remember(currentPrefs.githubUsername) { mutableStateOf(currentPrefs.githubUsername) }
@@ -269,7 +291,7 @@ fun ModelRouterAndGitHubSheet(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
-                    // Optional External API (OpenRouter / OpenAI-compatible)
+                    // Optional External API (OpenAI-Compatible OR Self-Hosted Text Router)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -277,7 +299,7 @@ fun ModelRouterAndGitHubSheet(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("External Domain Routing API (BYOK)", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                "Optional OpenRouter or OpenAI-compatible router for custom domain escalation.",
+                                "Connect an OpenAI-compatible router or a Self-Hosted Text Router (/query + /health). Tokens stay encrypted in AES-256-GCM Keystore Vault.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -290,21 +312,138 @@ fun ModelRouterAndGitHubSheet(
                     }
 
                     if (externalEnabled) {
+                        Text("Router Type", style = MaterialTheme.typography.labelLarge)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            ExternalRouterType.entries.forEach { rt ->
+                                FilterChip(
+                                    selected = externalRouterType == rt,
+                                    onClick = {
+                                        externalRouterType = rt
+                                        if (rt == ExternalRouterType.SELF_HOSTED_TEXT &&
+                                            externalBaseUrl.contains("openrouter.ai", ignoreCase = true)
+                                        ) {
+                                            externalBaseUrl = ""
+                                        }
+                                    },
+                                    label = { Text(rt.label) },
+                                    modifier = Modifier.testTag("router_type_${rt.wire.lowercase()}")
+                                )
+                            }
+                        }
+
                         OutlinedTextField(
                             value = externalBaseUrl,
                             onValueChange = { externalBaseUrl = it },
-                            label = { Text("Base URL") },
+                            label = {
+                                Text(
+                                    if (externalRouterType == ExternalRouterType.SELF_HOSTED_TEXT) {
+                                        "Self-Hosted Router Base URL (HTTPS)"
+                                    } else {
+                                        "Base URL"
+                                    }
+                                )
+                            },
+                            placeholder = { Text(externalRouterType.endpointHint) },
                             singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth().testTag("external_base_url_input")
+                        )
+                        OutlinedTextField(
+                            value = externalAuthVaultRef,
+                            onValueChange = { externalAuthVaultRef = it.uppercase() },
+                            label = { Text("Encrypted Vault Key Reference") },
+                            placeholder = { Text("EXTERNAL_API_KEY") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("external_vault_ref_input")
                         )
                         OutlinedTextField(
                             value = externalApiKey,
                             onValueChange = { externalApiKey = it },
-                            label = { Text("API Key (Stored Locally Only)") },
+                            label = { Text("Bearer Token / API Key (Stored in AES-256-GCM Vault)") },
                             visualTransformation = PasswordVisualTransformation(),
                             singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth().testTag("external_api_key_input")
                         )
+
+                        if (externalRouterType == ExternalRouterType.SELF_HOSTED_TEXT) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainer,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "Self-Hosted /query Contract: POST {base}/query with {\"prompt\": \"...\"} (max 4,000 chars, no system prompt — server provides its own). Response shows lane & model chips.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Include Google Search Grounding (Opt-In)",
+                                                style = MaterialTheme.typography.labelLarge
+                                            )
+                                            Text(
+                                                text = "OFF by default so prompts go straight to your router with zero cloud pre-search unless opted in.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = selfHostedIncludeGrounding,
+                                            onCheckedChange = { selfHostedIncludeGrounding = it },
+                                            modifier = Modifier.testTag("self_hosted_grounding_toggle")
+                                        )
+                                    }
+                                    OutlinedTextField(
+                                        value = selfHostedApprovedSummary,
+                                        onValueChange = { selfHostedApprovedSummary = it.take(1200) },
+                                        label = { Text("Optional Approved Short Context Summary (${selfHostedApprovedSummary.length}/1200)") },
+                                        placeholder = { Text("Concise approved summary prepended before your prompt…") },
+                                        minLines = 2,
+                                        maxLines = 4,
+                                        modifier = Modifier.fillMaxWidth().testTag("self_hosted_summary_input")
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = { onCheckSelfHostedHealth(externalBaseUrl) },
+                                            enabled = !checkingSelfHostedHealth,
+                                            modifier = Modifier.weight(1f).testTag("self_hosted_health_btn")
+                                        ) {
+                                            if (checkingSelfHostedHealth) {
+                                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                                Spacer(Modifier.width(6.dp))
+                                            }
+                                            Text("Check /health")
+                                        }
+                                        OutlinedButton(
+                                            onClick = { showPayloadPreview = true },
+                                            modifier = Modifier.weight(1f).testTag("self_hosted_preview_payload_btn")
+                                        ) {
+                                            Text("Preview Payload")
+                                        }
+                                    }
+                                    selfHostedHealthResult?.let { hr ->
+                                        Text(
+                                            text = hr.summary,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                                            color = if (hr.reachable) VerifiedEmerald else BridgeAmber
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Domain-to-Model Matrix
@@ -393,8 +532,12 @@ fun ModelRouterAndGitHubSheet(
                             routingMode = routingMode,
                             escalationThreshold = threshold,
                             externalEnabled = externalEnabled,
+                            externalRouterType = externalRouterType,
                             externalBaseUrl = externalBaseUrl,
+                            externalAuthVaultRef = externalAuthVaultRef.trim().ifBlank { "EXTERNAL_API_KEY" },
                             externalApiKey = externalApiKey,
+                            selfHostedIncludeGrounding = selfHostedIncludeGrounding,
+                            selfHostedApprovedSummary = selfHostedApprovedSummary,
                             domainModelMatrix = domainMatrix,
                             githubPat = trimmedPat,
                             githubUsername = if (trimmedPat.isBlank()) "" else githubUser,
@@ -416,6 +559,42 @@ fun ModelRouterAndGitHubSheet(
 
             Spacer(Modifier.height(20.dp))
         }
+    }
+
+    if (showPayloadPreview) {
+        val samplePrompt = ExternalRouterApi.composeSelfHostedPrompt(
+            userPrompt = "<your prompt text here>",
+            approvedSummary = selfHostedApprovedSummary,
+            groundingEvidence = if (selfHostedIncludeGrounding) "<opt-in Google Search evidence digest>" else ""
+        )
+        val previewJson = ExternalRouterApi.buildSelfHostedPayloadJson(samplePrompt)
+        AlertDialog(
+            onDismissRequest = { showPayloadPreview = false },
+            title = { Text("Exact Self-Hosted /query Payload") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "POST ${externalBaseUrl.trim().trimEnd('/').ifBlank { "https://llm.example.com" }}/query\nAuthorization: Bearer <vault:${externalAuthVaultRef.ifBlank { "EXTERNAL_API_KEY" }}>\nNo system prompt is sent.",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = previewJson,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
+                        color = if (samplePrompt.length > ExternalRouterApi.SELF_HOSTED_MAX_PROMPT_CHARS) {
+                            CrimsonError
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        }
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPayloadPreview = false }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 }
 

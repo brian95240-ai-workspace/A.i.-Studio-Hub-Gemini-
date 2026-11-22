@@ -55,6 +55,7 @@ import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Toc
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -86,7 +87,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.model.ChatTurn
+import com.example.data.ai.ExternalRouterApi
 import com.example.data.model.ExportFileFormat
+import com.example.data.model.ExternalRouterType
 import com.example.data.model.GapVerdict
 import com.example.data.model.MetadataTagEngine
 import com.example.data.model.NoteCategory
@@ -584,6 +587,94 @@ fun ResearchScreen(
                                 .testTag("research_query_input")
                         )
 
+                        if (routingPrefs.externalEnabled &&
+                            routingPrefs.externalRouterType == ExternalRouterType.SELF_HOSTED_TEXT
+                        ) {
+                            val composedPreviewPrompt = ExternalRouterApi.composeSelfHostedPrompt(
+                                userPrompt = uiState.draftQuery,
+                                approvedSummary = routingPrefs.selfHostedApprovedSummary
+                            )
+                            val charCount = composedPreviewPrompt.length
+                            val overLimit = charCount > ExternalRouterApi.SELF_HOSTED_MAX_PROMPT_CHARS
+                            var showComposerPayloadPreview by remember { mutableStateOf(false) }
+
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (overLimit) {
+                                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (overLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "Self-Hosted /query: $charCount / ${ExternalRouterApi.SELF_HOSTED_MAX_PROMPT_CHARS} chars" +
+                                                if (routingPrefs.selfHostedIncludeGrounding) " · Grounding ON" else " · Grounding OFF",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                                            color = if (overLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            if (overLimit) {
+                                                TextButton(
+                                                    onClick = {
+                                                        val budget = (ExternalRouterApi.SELF_HOSTED_MAX_PROMPT_CHARS -
+                                                            routingPrefs.selfHostedApprovedSummary.length - 32).coerceAtLeast(100)
+                                                        onUpdateQuery(uiState.draftQuery.take(budget))
+                                                    },
+                                                    modifier = Modifier.testTag("trim_self_hosted_prompt_btn")
+                                                ) {
+                                                    Text("Trim")
+                                                }
+                                            }
+                                            TextButton(
+                                                onClick = { showComposerPayloadPreview = true },
+                                                modifier = Modifier.testTag("preview_self_hosted_payload_btn")
+                                            ) {
+                                                Text("Preview JSON")
+                                            }
+                                        }
+                                    }
+                                    if (overLimit) {
+                                        Text(
+                                            text = "Exceeds 4,000-character limit for self-hosted /query. Trim before sending.",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (showComposerPayloadPreview) {
+                                AlertDialog(
+                                    onDismissRequest = { showComposerPayloadPreview = false },
+                                    title = { Text("Exact /query Payload Preview") },
+                                    text = {
+                                        Text(
+                                            text = ExternalRouterApi.buildSelfHostedPayloadJson(composedPreviewPrompt),
+                                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily)
+                                        )
+                                    },
+                                    confirmButton = {
+                                        TextButton(onClick = { showComposerPayloadPreview = false }) {
+                                            Text("Close")
+                                        }
+                                    }
+                                )
+                            }
+                        }
+
                         VoiceNoteRecordingPanel(
                             state = voiceNoteRecorder.state,
                             autoRunPipeline = voiceNoteAutoRun,
@@ -913,6 +1004,18 @@ fun ResearchScreen(
                                                     text = if (isUser) "You" else turn.modelUsed.ifBlank { "Vortex AI" },
                                                     accentColor = if (isUser) MaterialTheme.colorScheme.primary else VerifiedEmerald
                                                 )
+                                                if (!isUser && turn.responseLane.isNotBlank()) {
+                                                    TelemetryPill(
+                                                        text = "lane: ${turn.responseLane}",
+                                                        accentColor = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                                if (!isUser && turn.responseLatencySeconds != null) {
+                                                    TelemetryPill(
+                                                        text = String.format(java.util.Locale.US, "%.2fs", turn.responseLatencySeconds),
+                                                        accentColor = MaterialTheme.colorScheme.tertiary
+                                                    )
+                                                }
                                                 TelemetryPill(
                                                     text = turnCategory.label,
                                                     accentColor = turnCatAccent

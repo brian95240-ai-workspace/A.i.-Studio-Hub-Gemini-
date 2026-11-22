@@ -69,6 +69,7 @@ class VortexPipelineOrchestrator(
         prefs: RoutingPreferences,
         detectedLanguages: List<String> = emptyList(),
         envPolicyContext: String = "",
+        stageContextProvider: ((Int?) -> String)? = null,
         onProgress: (List<StageRecord>, Stage0TriageResult?) -> Unit
     ): PipelineExecutionOutput = runFromPass(
         startPass = 0,
@@ -82,6 +83,7 @@ class VortexPipelineOrchestrator(
         prefs = prefs,
         detectedLanguages = detectedLanguages,
         envPolicyContext = envPolicyContext,
+        stageContextProvider = stageContextProvider,
         onProgress = onProgress
     )
 
@@ -106,15 +108,15 @@ class VortexPipelineOrchestrator(
         prefs: RoutingPreferences,
         detectedLanguages: List<String> = emptyList(),
         envPolicyContext: String = "",
+        stageContextProvider: ((Int?) -> String)? = null,
         onProgress: (List<StageRecord>, Stage0TriageResult?) -> Unit
     ): PipelineExecutionOutput {
         val stages = initialSkeleton().mapIndexed { idx, defaultStage ->
             existingStages.firstOrNull { it.stageNumber == idx } ?: defaultStage
         }.toMutableList()
-        val effectivePolicy = if (envPolicyContext.isNotBlank()) {
-            "$empiricalPolicy\n\n$envPolicyContext"
-        } else {
-            empiricalPolicy
+        fun policyForStage(stageId: Int): String {
+            val extra = stageContextProvider?.invoke(stageId) ?: envPolicyContext
+            return if (extra.isNotBlank()) "$empiricalPolicy\n\n$extra" else empiricalPolicy
         }
 
         // STAGE 0: Triage
@@ -168,7 +170,7 @@ class VortexPipelineOrchestrator(
                 """.trimIndent()
 
                 val pass1 = router.generateGrounded(
-                    systemDirective = effectivePolicy,
+                    systemDirective = policyForStage(1),
                     userPrompt = pass1Prompt,
                     domain = resolvedTriage.detectedDomain,
                     complexityScore = resolvedTriage.complexityScore,
@@ -183,6 +185,8 @@ class VortexPipelineOrchestrator(
                 stages[1] = stages[1].copy(
                     status = "COMPLETED",
                     modelUsed = pass1.modelUsed,
+                    responseLane = pass1.responseLane,
+                    responseLatencySeconds = pass1.latencySeconds,
                     routingReason = pass1.routingReason,
                     fallbackNote = pass1.fallbackNote,
                     content = s1,
@@ -192,6 +196,8 @@ class VortexPipelineOrchestrator(
                 stages[2] = stages[2].copy(
                     status = "COMPLETED",
                     modelUsed = pass1.modelUsed,
+                    responseLane = pass1.responseLane,
+                    responseLatencySeconds = pass1.latencySeconds,
                     routingReason = pass1.routingReason,
                     fallbackNote = pass1.fallbackNote,
                     content = s2.ifBlank { "Expert panel synthesized inside Stage 1–3 pass." }
@@ -199,6 +205,8 @@ class VortexPipelineOrchestrator(
                 stages[3] = stages[3].copy(
                     status = "COMPLETED",
                     modelUsed = pass1.modelUsed,
+                    responseLane = pass1.responseLane,
+                    responseLatencySeconds = pass1.latencySeconds,
                     routingReason = pass1.routingReason,
                     fallbackNote = pass1.fallbackNote,
                     content = s3.ifBlank { "Multi-expert lens analyses integrated." },
@@ -250,7 +258,7 @@ class VortexPipelineOrchestrator(
                 """.trimIndent()
 
                 val pass2 = router.generateGrounded(
-                    systemDirective = effectivePolicy,
+                    systemDirective = policyForStage(4),
                     userPrompt = pass2Prompt,
                     domain = resolvedTriage.detectedDomain,
                     complexityScore = resolvedTriage.complexityScore,
@@ -270,6 +278,8 @@ class VortexPipelineOrchestrator(
                 stages[4] = stages[4].copy(
                     status = "COMPLETED",
                     modelUsed = pass2.modelUsed,
+                    responseLane = pass2.responseLane,
+                    responseLatencySeconds = pass2.latencySeconds,
                     routingReason = pass2.routingReason,
                     fallbackNote = pass2.fallbackNote,
                     content = s4,
@@ -279,6 +289,8 @@ class VortexPipelineOrchestrator(
                 stages[5] = stages[5].copy(
                     status = "COMPLETED",
                     modelUsed = pass2.modelUsed,
+                    responseLane = pass2.responseLane,
+                    responseLatencySeconds = pass2.latencySeconds,
                     routingReason = pass2.routingReason,
                     fallbackNote = pass2.fallbackNote,
                     content = buildString {
@@ -349,7 +361,7 @@ class VortexPipelineOrchestrator(
                     """.trimIndent()
 
                     val pass3 = router.generateGrounded(
-                        systemDirective = effectivePolicy,
+                        systemDirective = policyForStage(6),
                         userPrompt = pass3Prompt,
                         domain = resolvedTriage.detectedDomain,
                         complexityScore = resolvedTriage.complexityScore,
@@ -362,6 +374,8 @@ class VortexPipelineOrchestrator(
                     stages[6] = stages[6].copy(
                         status = "COMPLETED",
                         modelUsed = pass3.modelUsed,
+                        responseLane = pass3.responseLane,
+                        responseLatencySeconds = pass3.latencySeconds,
                         routingReason = pass3.routingReason,
                         fallbackNote = pass3.fallbackNote,
                         content = s6,
@@ -371,6 +385,8 @@ class VortexPipelineOrchestrator(
                     stages[7] = stages[7].copy(
                         status = "COMPLETED",
                         modelUsed = pass3.modelUsed,
+                        responseLane = pass3.responseLane,
+                        responseLatencySeconds = pass3.latencySeconds,
                         routingReason = pass3.routingReason,
                         fallbackNote = pass3.fallbackNote,
                         content = s7.ifBlank { "Unified mitigation bridge integrated with Stage 6 emulation layer." },

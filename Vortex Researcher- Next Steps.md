@@ -2,23 +2,32 @@
 
 > **Document Purpose:** Canonical root-level systems architecture blueprint, database & infrastructure gap analysis, prioritized silo breakdown, cascading roadmap, "greased" end-to-end workflow documentation, and collaborator onboarding playbook for **Vortex Researcher**.
 >
-> **Scope & Privacy Contract:** Vortex Researcher is a **shared universal Android research platform**. Every database, object storage bucket, vector store, and MCP server endpoint is strictly **Bring-Your-Own-Infrastructure (BYO-Infra)** with a 3-tier visibility boundary (`PRIVATE_SOLO`, `SANDBOXED_READ_ONLY`, `PUBLIC_TEAM`). No personal hostnames, IPs, credentials, or private infrastructure are hardcoded anywhere in this codebase.
+> **Scope & Privacy Contract:** Vortex Researcher is a **shared universal Android research platform**. Every database, object storage bucket, vector store, self-hosted router, and MCP server endpoint is strictly **Bring-Your-Own-Infrastructure (BYO-Infra)** and **standby-first** (zero background polling). Server-side controls are the real security boundary; client-side indicators are advisory only. No personal hostnames, IPs, ports, tailnet names, or secrets are hardcoded anywhere in this codebase.
 
 ---
 
-## 0. System Architecture & Privacy Boundary Overview
+## 0. System Architecture, Standby Contract & Privacy Boundary
 
 ### Executive Baseline
 
-| Dimension | Verified Baseline Audit |
+| Dimension | Verified Hardened Baseline |
 | :--- | :--- |
 | **Platform** | Android (Kotlin + Jetpack Compose M3, Edge-to-Edge, Adaptive Compact / Expanded) |
-| **Codebase Footprint** | ~46,500+ LOC across 74+ Kotlin modules (MVVM + Offline-First Room/Firestore) |
-| **Core AI Engine** | Firebase AI Logic (`Firebase.ai`, App Check enforced) + optional BYOK OpenRouter/OpenAI external router |
-| **Local Persistence** | Room (`VortexLocalDatabase` v3) + Jetpack DataStore (`LocalPreferencesStore`) + Android Keystore AES-256-GCM (`EncryptedEnvVaultStore`) |
+| **Core AI Engines** | Firebase AI Logic (`Firebase.ai`, Play Integrity App Check in release / Debug provider in debug) + BYOK OpenAI-Compatible Router + **Self-Hosted Text Router** (`POST /query` + `GET /health`) |
+| **Secrets & Local Storage** | Android Keystore AES-256-GCM (`EncryptedEnvVaultStore`, including migrated `EXTERNAL_API_KEY` & `GITHUB_PAT`) + Jetpack DataStore (`LocalPreferencesStore`, non-secret prefs only) + Room (`VortexLocalDatabase` v3). `android:allowBackup="false"` plus explicit `backup_rules.xml` & `data_extraction_rules.xml` exclusions for DataStore, vault, MCP stores, and Room DB |
 | **Cloud & Sync Channels** | Firestore (`projects`, `prds`, `roundtable`, `public_shares`), Google Drive Mirror, GitHub Git Data API Mirror, Android SAF Local Folder Sync |
 | **Visual & Geospatial Studio** | Mermaid.js Interactive Studio (PNG/SVG export + collaborative sticky-note/drawing layer), LaTeX/KaTeX, Cypher/Apache AGE, PostGIS GeoJSON, NetworkX, D3.js, and PostGIS/PostgreSQL Entity Schema Mapper |
-| **Standby Infrastructure Layer (`vNext`)** | Universal DB, Object Storage & MCP Connector Hub (3 Storage/DB tiers + 9 MCP templates + Custom BYO CRUD), 3-Tier Privacy Isolation (`PRIVATE_SOLO` / `SANDBOXED_READ_ONLY` / `PUBLIC_TEAM`), Client-Side Read-Only Sandbox Guard, Offline UTC↔Local Time Sync Engine, Extended `.env` Vault Targets, and In-App Handoff Viewer + Root GitHub Mirror |
+| **Standby Infrastructure & MCP Layer** | Universal DB, Object Storage & MCP Connector Hub (3 Storage/DB tiers + 9 MCP templates + Custom BYO CRUD), direct HTTPS URLs primary (Tailscale `https://<machine>.<tailnet>.ts.net:<port>/mcp` & Cloudflare Access sandboxes), Streamable HTTP JSON-RPC 2.0 MCP Client (`initialize`, `tools/list`, `tools/call`), deny-by-default exact-name allowlists, dual-condition read-only policy, untrusted-data envelope, local SHA-256 audit log, offline UTC↔Local Time Sync, and in-app Handoff Viewer |
+
+### Operating Assumptions & Security Boundary
+
+1. **Standby-First (Zero Background Polling):** External servers and databases remain **OFFLINE** while backend systems are hardened. Vortex Researcher performs zero automatic background polling and assumes nothing is online until you manually tap **Test Endpoint**, **Check /health**, or **Sync `tools/list`**.
+2. **Server-Side Controls Are the Real Security Boundary:** Anything enforced on the phone (UI toggles, advisory capability grouping, or confirmation dialogs) is **advisory only**. Real access control, Tailscale tailnet ACLs, Cloudflare Access per-person identity checks, Bearer authentication, and server-side read-only enforcement (such as Memgraph `MCP_READ_ONLY` + a query allowlist proxy) MUST live on the server.
+3. **Direct HTTPS URLs Primary (No Single Mandatory Gateway):**
+   - **Owner Tailscale Tailnet:** One direct HTTPS URL per server, each on its own port (`https://<machine>.<tailnet>.ts.net:<port>/mcp`), with tailnet membership as the network boundary plus optional Bearer token from the encrypted vault.
+   - **Cloudflare Access Sandboxes:** Used for sandbox copies shared with collaborators via per-person identity login (no shared service tokens). Probes and MCP requests disable redirects (`followRedirects = false`) and surface `401`/`403`/`3xx` login challenges cleanly as **`AUTH REQUIRED`**.
+   - **Optional Gateway Base URL:** Kept available in Tab 3 for deployments that choose to put connectors behind a reverse proxy, but disabled by default on every connector.
+4. **Vendor-Neutral & Bring-Your-Own:** No personal hostnames, IPs, specific port assignments, real tailnet names, non-Firebase personal account/project IDs, or secrets exist in code, docs, defaults, or examples.
 
 ### System Topology & Zero-Leakage Boundary
 
@@ -34,44 +43,44 @@
           │                    │                    │                │
           ▼                    ▼                    ▼                ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                     DEVICE-LOCAL ZERO-LEAKAGE BOUNDARY                       │
+│          DEVICE-LOCAL ZERO-LEAKAGE BOUNDARY (BACKUP-EXCLUDED)                │
 │  ┌─────────────────────────┐     ┌────────────────────────────────────────┐  │
 │  │ Encrypted .env Vault    │────▶│ Universal Connector Registry (Local)   │  │
-│  │ (AES-256-GCM Keystore)  │     │ • Per-endpoint Visibility Scope:       │  │
-│  │ • Never leaves device   │     │   [PRIVATE_SOLO]        (local only)   │  │
-│  │ • Auto-fill DB/MCP keys │     │   [SANDBOXED_READ_ONLY] (safe collab)  │  │
-│  └─────────────────────────┘     │   [PUBLIC_TEAM]         (opt-in shared)│  │
-│                                  │ • HTTPS/SSRF validator + Standby mode  │  │
-│                                  │ • Local UTC↔Local Time Sync fallback   │  │
+│  │ (AES-256-GCM Keystore)  │     │ • Per-connector Direct HTTPS Primary   │  │
+│  │ • EXTERNAL_API_KEY      │     │ • Visibility Scope:                    │  │
+│  │ • GITHUB_PAT            │     │   [PRIVATE_SOLO] (name anonymized by   │  │
+│  │ • DB/MCP Bearer & Header│     │     default in cloud AI prompts)       │  │
+│  │   refs (never backed up)│     │   [SANDBOXED_READ_ONLY] (server RO)    │  │
+│  │ • Explicit confirmation │     │   [PUBLIC_TEAM] (opt-in descriptor)    │  │
+│  │   for plaintext export  │     │ • Streamable HTTP MCP Client + Local   │  │
+│  └─────────────────────────┘     │   SHA-256 Audit Log + Full Result Ref  │  │
 │                                  └──────────────────┬─────────────────────┘  │
 └─────────────────────────────────────────────────────┼────────────────────────┘
                                                       │
-              ┌───────────────────────────────────────┴───────────────────────┐
-              ▼ (Private Solo · Owner-Only)                                   ▼ (Sandboxed Read-Only / Public Team)
-┌───────────────────────────────────────────┐       ┌────────────────────────────────────────────┐
-│ USER'S PRIVATE INFRASTRUCTURE (STANDBY)   │       │ COLLABORATIVE / PUBLIC ENDPOINTS           │
-│ • Neon PostgreSQL (PostGIS + Apache AGE)  │       │ • Forked Read-Only Sandboxed Memgraph MCP  │
-│ • S3 / R2 / MinIO Object Storage          │       │   (Mutations stripped client + server side)│
-│ • LanceDB Hybrid Vector Store             │       │ • Any Team-Opted Public DB / MCP Endpoint  │
-│ • Private MCPs via User's VPS Gateway:    │       │ • Shared Firestore / GitHub Repo Mirror    │
-│   Temporal, Letta, Time Sync, Vertex,     │       │   (Root 'Vortex Researcher- Next Steps.md')│
-│   Playwright → Browser Use (fallback),    │       │                                            │
-│   VPS-Access Launcher, World Mechanic     │       │                                            │
-└───────────────────────────────────────────┘       └────────────────────────────────────────────┘
+         ┌────────────────────────────────────────────┴─────────────────────────┐
+         ▼ (Direct Tailscale HTTPS · Owner Tailnet)                             ▼ (Cloudflare Access / Shared Sandbox)
+┌─────────────────────────────────────────────┐       ┌──────────────────────────────────────────────┐
+│ OWNER PRIVATE INFRASTRUCTURE (STANDBY)      │       │ COLLABORATIVE / PUBLIC ENDPOINTS             │
+│ • Neon PostgreSQL (PostGIS + Apache AGE)    │       │ • Forked Read-Only Memgraph Sandbox          │
+│ • S3 / R2 / MinIO Object Storage            │       │   (Server MCP_READ_ONLY + query allowlist)   │
+│ • LanceDB Hybrid Vector Store               │       │ • Self-Hosted Text Router (/query, /health)  │
+│ • Direct Per-Server MCP Endpoints           │       │ • Shared Firestore / GitHub Repo Mirror      │
+│   https://<machine>.<tailnet>.ts.net:<port> │       │   (Root 'Vortex Researcher- Next Steps.md')  │
+└─────────────────────────────────────────────┘       └──────────────────────────────────────────────┘
 ```
 
 ### Core Codebase Module Map (Collaborator Orientation)
 
 | Package / Layer | Key Modules | Responsibility |
 | :--- | :--- | :--- |
-| `data/ai` | `VortexPipelineOrchestrator`, `VortexModelRouter`, `ExternalRouterApi` | 7-stage empirically grounded synthesis, Stage 0 complexity triage, PostGIS entity extraction, BYOK router fallback |
-| `data/infra` | `InfrastructureConnectorModels`, `InfrastructureRegistryEngine`, `TimeSyncContextEngine` | Universal BYO DB/Storage/MCP contracts, 3-tier visibility isolation, Read-Only Sandbox Guard, HTTPS/SSRF probe, offline UTC↔Local clock |
-| `data/local` | `LocalPreferencesStore`, `VortexLocalDatabase`, `VortexCacheEntities`, `VortexCacheDaos` | Device-local DataStore registry & preferences, Room v3 offline cache + pending sync queue |
-| `data/security` | `EncryptedEnvVaultStore`, `EnvSecretModels` | Hardware-backed AES-256-GCM `.env` vault, per-entry AI permission matrix, discrete auto-fill targets |
+| `auth` | `AppCheckInit`, `debug/AppCheckVariantInstaller`, `release/AppCheckVariantInstaller`, `GoogleAuthHelper` | Variant-split Firebase App Check (Play Integrity in release, Debug provider in debug) and Google Credential Manager sign-in |
+| `data/ai` | `VortexPipelineOrchestrator`, `VortexModelRouter`, `ExternalRouterApi` | 7-stage grounded synthesis, stage-scoped context injection, OpenAI-compatible router, and Self-Hosted Text Router (`POST /query`, `GET /health`, 4,000-char cap, lane/latency telemetry) |
+| `data/infra` | `InfrastructureConnectorModels`, `InfrastructureRegistryEngine`, `McpJsonRpcClient`, `McpLocalStores`, `TimeSyncContextEngine` | Universal BYO DB/Storage/MCP contracts, universal HTTPS + SSRF validation, `AUTH_REQUIRED` probe, Streamable HTTP JSON-RPC 2.0 MCP client, dual-condition read-only policy, untrusted-data envelope, local SHA-256 audit log, offline UTC↔Local clock |
+| `data/local` | `LocalPreferencesStore`, `VortexLocalDatabase`, `VortexCacheEntities`, `VortexCacheDaos` | Non-secret DataStore preferences & registry, Room v3 offline cache + pending sync queue |
+| `data/security` | `EncryptedEnvVaultStore`, `SecretVaultMigration`, `EnvSecretModels` | Hardware-backed AES-256-GCM `.env` vault, one-time verified migration of legacy DataStore secrets, per-entry AI permission matrix, explicit unencrypted-export confirmation gate |
 | `data/sync` & `data/github` | `OfflineFirstRepository`, `GitHubGitSyncEngine`, `GoogleDriveSyncService`, `SafFolderSyncManager` | Quad-channel replication (Room ↔ Firestore, GitHub atomic commits, Drive mirror, zero-permission SAF) |
-| `data/docs` | `VortexNextStepsDocProvider` | Structured in-app handoff document & one-tap root GitHub mirror source |
-| `ui/components` | `InfrastructureHubSheet`, `NextStepsHandoffDialog`, `MermaidDiagramViewer`, `SpecializedFormatViewer`, `PostGisSchemaMapperView` | Full-screen Obsidian M3 studios, interactive diagrams, collaborative sticky-note/drawing overlays, schema mapper |
-| `ui/screens` & `ui/viewmodel` | `ProjectDashboardScreen`, `ResearchScreen`, `RoundtableScreen`, `PrdStudioScreen`, `VortexViewModel` | Adaptive Compact/Expanded workspaces, voice dictation/search, auto-tagging, unified state orchestration |
+| `data/docs` | `VortexNextStepsDocProvider` | Structured in-app handoff document & one-tap root GitHub mirror source (byte-for-byte identical to root Markdown) |
+| `ui/components` | `InfrastructureHubSheet`, `EnvSecretsVaultSheet`, `SheetsAndDialogs`, `NextStepsHandoffDialog`, `MermaidDiagramViewer`, `SpecializedFormatViewer`, `PostGisSchemaMapperView` | Full-screen Obsidian M3 studios, MCP live tool policy & invoker dialog, Self-Hosted router payload preview, interactive diagrams, schema mapper |
 
 ---
 
@@ -93,7 +102,7 @@ Databases are the load-bearing foundation of Vortex Researcher. Auditing `firest
 
 ### 1.3 Relational & Spatial Execution Tier — Neon PostgreSQL + PostGIS + Apache AGE (High)
 - **Current State:** `PostGisSchemaMapperEngine.kt` generates normalized PostgreSQL + PostGIS (`SRID 4326`, `GIST` spatial indexes) + Apache AGE Cypher migration SQL locally, but cannot execute migrations or query Neon DB directly.
-- **Foundational Hole:** Android cannot safely maintain direct libpq TCP connection pools against serverless PostgreSQL without an HTTPS SQL proxy or gateway.
+- **Foundational Hole:** Android cannot safely maintain direct libpq TCP connection pools against serverless PostgreSQL without an HTTPS SQL proxy.
 - **Required Support:** Universal **Neon / PostgreSQL HTTPS SQL Proxy Connector** (`db_neon_postgres`, bound to `NEON_DATABASE_URL`) supporting parameterized HTTPS queries, transactional dry-run validation (`BEGIN; ... ROLLBACK;`), and strict `PRIVATE_SOLO` default isolation.
 
 ### 1.4 Hybrid Vector & Semantic Search Tier — LanceDB (High)
@@ -102,9 +111,9 @@ Databases are the load-bearing foundation of Vortex Researcher. Auditing `firest
 - **Required Support:** Universal **LanceDB Vector Store Connector** (`vector_lancedb`, bound to `LANCEDB_URL`) for hybrid vector + BM25 retrieval, chunked upsert on pipeline completion, and project-scoped RAG context injection.
 
 ### 1.5 Live Graph Execution & Collaborative Sandbox Tier — Memgraph (Medium-High)
-- **Current State:** `SpecializedFormatEngine.kt` renders Cypher/AGE/NetworkX graphs locally in WebView, without live Memgraph traversal.
-- **Foundational Hole:** Collaborative agents need live graph traversal without risking destructive mutations (`CREATE`, `MERGE`, `DELETE`, `DROP`) against an owner's primary graph database.
-- **Required Support:** First-class **`SANDBOXED_READ_ONLY`** mode on **Memgraph MCP** (`mcp_memgraph`), directly modeling a forked read-only Memgraph MCP server with both client-side write/mutation capability stripping and server-side read-only enforcement.
+- **Current State:** `SpecializedFormatEngine.kt` renders Cypher/AGE/NetworkX graphs locally in WebView; live Memgraph traversal is wired via the Streamable HTTP MCP client once a server comes online.
+- **Foundational Hole:** Real Memgraph tool names such as `run_cypher_query` can mutate a graph without containing words like `write` or `delete`, so client-side substring filtering is **never** a security control.
+- **Required Support:** Pair the **Memgraph Sandboxed Read-Only Preset** (`serverEnforcesReadOnly = true`, `SANDBOXED_READ_ONLY` visibility) with server-side **`MCP_READ_ONLY`** enforcement and a query allowlist proxy, plus exact-name allowlisting from live `tools/list`.
 
 ### 1.6 Unified Storage Router Policy (Data Placement Contract)
 
@@ -114,65 +123,58 @@ Databases are the load-bearing foundation of Vortex Researcher. Auditing `firest
 | Large artifacts (> 256 KB: GeoJSON, GraphML, PNG/SVG, audio) | **S3 / R2 / MinIO Object Storage** | Lightweight pointer + SHA-256 in Firestore |
 | Extracted entities, PostGIS geometries (`SRID 4326`), relational tables | **Neon PostgreSQL (PostGIS + AGE)** | Versioned `.sql` migrations in GitHub / SAF |
 | Embeddings, semantic chunks, voice transcripts, Roundtable notes | **LanceDB Vector Store** | Keyword + `#tag` index in `MetadataTagEngine` |
-| Live property graphs & collaborative agentic traversals | **Memgraph MCP (`SANDBOXED_READ_ONLY` fork or `PRIVATE_SOLO`)** | Local Cypher / NetworkX studio export |
+| Live property graphs & collaborative agentic traversals | **Memgraph MCP (server-side `MCP_READ_ONLY` + allowlist proxy)** | Local Cypher / NetworkX studio export |
 | Human-readable docs, PRDs, architecture diagrams | **GitHub Mirror + Google Drive + Android SAF** | Local Room snapshot & Bulk ZIP export |
 
 ---
 
-## 2. Prioritized Silo-by-Silo Breakdown & Universal Infrastructure Matrix
+## 2. Prioritized Silo Breakdown & Accurate MCP Connector Contracts
 
 After Databases & Storage (Silo #1), the remaining six silos are prioritized by architectural leverage and operational risk:
 
-### Priority 2 — MCP Protocol & Universal Agent Tooling Silo (9 Canonical Servers + Custom)
-**Weaknesses / Voids Identified:**
-- Prior to this release, Vortex Researcher had zero MCP JSON-RPC 2.0 / Streamable HTTP transport contracts, zero standby state management, and no universal registry for user-supplied endpoints.
-- **Canonical 9-Server Standby Contract** (all default to `STANDBY` + `PRIVATE_SOLO`, zero hardcoded personal hosts):
+### Priority 2 — MCP Protocol & Universal Agent Tooling Silo (9 Canonical Templates + Custom)
+All connector templates default to **`STANDBY`**, **`PRIVATE_SOLO`**, and **`useGatewayProxy = false`** (direct per-server HTTPS URLs primary). All template tool lists are explicitly marked **"expected; confirm with `tools/list` when online"**; live calls use deny-by-default exact-name allowlists discovered from `tools/list` (never substring matching).
 
-| # | MCP Server Template | Primary Role in Vortex Researcher | Standby / Privacy / Fallback Contract |
+| # | MCP Server Template | Real Role & Expected Tools (*confirm with `tools/list` when online*) | Isolation, Phone-Callability & Policy Contract |
 | :--- | :--- | :--- | :--- |
-| **1** | **Temporal MCP** | Durable workflow orchestration for 7-stage pipelines, retries, and background sync | Moves execution out of fragile foreground `viewModelScope` |
-| **2** | **Letta MCP** | Persistent hierarchical core + archival agent memory across sessions & Roundtable | Project-scoped memory partitions; prevents cross-tenant leakage |
-| **3** | **Memgraph MCP** | Live Cypher property graph queries & ontology traversal | Includes 1-tap **`SANDBOXED_READ_ONLY` Fork** preset stripping all write/delete mutations |
-| **4** | **Time & Date Sync MCP** | Translates canonical UTC timestamps into user's current local wall-clock timezone | **Local offline engine active immediately**; delegates seamlessly when remote MCP is online |
-| **5** | **Vertex Solver MCP** | Mathematical optimization, graph routing & formal constraint verification | Read-only solver invocation over extracted PostGIS/graph payloads |
-| **6** | **Playwright MCP** | **Primary** deterministic headless browser automation & structured DOM capture | Read-only web extraction & citation verification |
-| **7** | **Browser Use MCP** | **Explicit Fallback immediately after Playwright MCP** (`fallbackAfterId = mcp_playwright`) | Vision-guided agentic browser fallback when SPAs or dynamic layouts block deterministic Playwright selectors |
-| **8** | **VPS-Access Launcher MCP** | Remote VPS container health, startup & service control (e.g., Contabo or any BYO VPS) | Strictly **`PRIVATE_SOLO`**; never shared in team or public manifests |
-| **9** | **World Mechanic MCP** | Cross-system optimization, process-overlap detection & resource tuning | Consumes non-secret telemetry to recommend pipeline & cache tuning |
-| **+** | **Custom DB / Custom MCP** | Universal BYO extensibility for external users' own infrastructure | Full CRUD inside the Hub with HTTPS/SSRF validation & 3-tier visibility scope |
+| **1** | **Temporal MCP** | Durable workflow orchestration for long-running pipelines, retries, and status inspection (`start_workflow`, `describe_workflow`, `query_workflow`, `signal_workflow`) | Enabled in standby; stage-scoped once ONLINE and allowlisted |
+| **2** | **Letta MCP** | Persistent hierarchical core + archival agent memory across sessions & Roundtable (`read_core_memory`, `search_archival_memory`, `insert_archival_memory`) | Project-scoped memory partitions; prevents cross-tenant leakage |
+| **3** | **Memgraph MCP** | Live Cypher property graph queries & schema introspection (`list_databases`, `use_database`, `run_cypher_query`, `search_schema`, `get_node_schema`, `get_relationship_schema`, `get_enum_schema`) | Production Memgraph is NEVER exposed; 1-tap Sandboxed Read-Only Preset sets `serverEnforcesReadOnly = true` + `SANDBOXED_READ_ONLY` (real enforcement is server-side `MCP_READ_ONLY` + query allowlist proxy) |
+| **4** | **Time & Date Sync MCP** | Canonical server time lookup (`get_current_time`) | Local offline UTC↔Local engine active immediately; delegates when ONLINE |
+| **5** | **Vertex Solver MCP** | Mathematical optimization, routing & formal constraint verification (`solve_linear_program`, `solve_routing`, `verify_constraints`) | Read-only solver invocation over extracted PostGIS/graph payloads |
+| **6** | **Playwright MCP** | **Primary** deterministic headless browser automation & structured DOM capture (`browser_navigate`, `browser_snapshot`, `browser_click`, `browser_evaluate`) | Primary web extraction & citation verification |
+| **7** | **Browser Use MCP** | **Explicit Fallback immediately after Playwright** (`fallbackAfterId = mcp_playwright`, editable `fallbackTrigger`) for dynamic SPAs/vision tasks (`browser.agent_navigate`, `browser.visual_extract`, `browser.fallback_crawl`) | **Server-side isolated sandbox tier only (`phoneDirectCallable = false`)** — never called directly from phone; treat output as untrusted data |
+| **8** | **VPS-Access Launcher MCP** | Remote host/container health & service control (`vps.health_check`, `vps.list_services`, `vps.launch_service`, `vps.restart_container`) | **Disabled by default**, locked strictly to **`PRIVATE_SOLO`**, **`requirePerCallConfirmation = true`** (confirms every call regardless of hints) |
+| **9** | **World Mechanic ("Stage") MCP** | Sandboxed code-execution server ("Stage") with port-bound server-side trust (`stage_exec`, `stage_files`, `stage_session`, `stage_audit`, `stage_browse` refusing stub) | **Disabled by default**, cannot be `PUBLIC_TEAM`, **`phoneDirectCallable = false`** (phone-originated calls count as untrusted) |
+| **+** | **Custom DB / Custom MCP** | Universal BYO extensibility for any user-supplied HTTPS database or MCP server | Full CRUD with universal HTTPS + SSRF validation, custom header vault refs, and 3-tier visibility scope |
 
-### Priority 3 — Durable Orchestration & Background Execution Silo (`VortexPipelineOrchestrator`)
-- **Weaknesses / Voids:**
-  - The 7-stage pipeline (`878 LOC`) executes inside `viewModelScope`; OS backgrounding halts in-flight passes until manually retried.
-  - Stage prompts previously lacked a canonical UTC↔Local temporal anchor.
-- **Resolution Path:**
-  - *Shipped Now:* Injects canonical `TimeSyncContextEngine` UTC↔Local header + authorized non-secret infra capabilities via `buildAgentRuntimeContext()`.
-  - *Next Phase:* Bind `WorkManager` local checkpointing and delegate long-running workflows to **Temporal MCP** when online.
+### Priority 3 — Durable Orchestration & Context Hygiene (`VortexPipelineOrchestrator`)
+- **Shipped Hardening:**
+  - `buildAuthorizedAgentInfraContext(state, currentStageId)` injects **only** enabled, `ONLINE`, phone-callable MCP connectors that have at least one allowlisted tool and match the active stage (`selectedStages`).
+  - `PRIVATE_SOLO` connector names are anonymized in cloud prompts unless the user explicitly enables `shareNameWithAi` (OFF by default).
+  - Hard token budget enforced (default **150 tokens**, configurable 40–1000).
+- **Next Phase:** Bind `WorkManager` local checkpointing and delegate multi-minute workflows to **Temporal MCP** when online.
 
-### Priority 4 — Sync & Replication Fabric Silo (Room + Firestore + Drive + GitHub + SAF)
-- **Weaknesses / Voids:**
-  - Four separate sync telemetry structures (`OfflineSyncTelemetry`, `DriveHeaderSyncState`, `GitHubHeaderSyncState`, `SafFolderBindings`) duplicate SHA-256 hashing and badge computation.
-  - Conflict resolution (`SyncConflictResolutionDialog`) covers Room ↔ Firestore only, not Drive/GitHub/SAF drift.
-- **Resolution Path:** Consolidate behind a single `WorkspaceDigestCache` and unified `SyncChannelBadgeState` so one SHA-256 digest serves all channels atomically.
+### Priority 4 — Self-Hosted Text Router Integration (`ExternalRouterApi` & `VortexModelRouter`)
+- **Shipped Hardening:**
+  - Added `ExternalRouterType.SELF_HOSTED_TEXT` alongside `OPENAI_COMPATIBLE`.
+  - Sends `POST <baseUrl>/query` with exact JSON body `{"prompt": "<string>"}` and parses `{"response": "...", "lane": "...", "latency": 1.23}`.
+  - Enforces a **4,000-character prompt cap** with live ResearchScreen counter, Trim helper, and exact JSON payload preview.
+  - **Grounding is OFF by default** for self-hosted queries; users can opt in to append an approved short summary.
+  - Supports `GET <baseUrl>/health` status check, explicit `200`/`400`/`401`/`3xx` handling (redirects disabled), Bearer token from Keystore vault ref, and `lane` + `latency` chips on Stage cards and Chat turns.
 
-### Priority 5 — Visualization, Authoring & Spatial/Graph Studio Silo
-- **Weaknesses / Voids:**
-  - `MermaidDiagramEngine.kt` + `MermaidDiagramViewer.kt` and `SpecializedFormatEngine.kt` + `SpecializedFormatViewer.kt` duplicate WebView lifecycle, theme toggling, and PNG/SVG export logic.
-  - Collaborative sticky-note & drawing overlay (`MermaidAnnotationOverlay.kt`) is currently Mermaid-only.
-- **Resolution Path:** Extract a shared `InteractiveDiagramSurface` and universal `DiagramAnnotationOverlay` spanning Mermaid, LaTeX, Cypher, GeoJSON, NetworkX, and D3.js.
+### Priority 5 — Sync & Replication Fabric Silo (Room + Firestore + Drive + GitHub + SAF)
+- Consolidate duplicate SHA-256 digest and badge state across Room/Firestore, Drive, GitHub, and SAF into a unified `WorkspaceDigestCache` + `SyncChannelBadgeState`.
 
-### Priority 6 — Voice Ingestion, Auto-Tagging & Search Silo
-- **Weaknesses / Voids:**
-  - Voice note transcription, auto-categorization (`Draft`, `Action Item`, `Research Query`), and voice dashboard search reuse `VortexSpeechController` and `MetadataTagEngine` cleanly, but search currently operates only over in-memory loaded Firestore projects.
-- **Resolution Path:** Upsert voice-note transcripts and extracted metadata tags into **LanceDB** on save so voice search queries both local tags and semantic vector similarity simultaneously.
+### Priority 6 — Visualization, Authoring & Spatial/Graph Studio Silo
+- Extract a shared `InteractiveDiagramSurface` and universal `DiagramAnnotationOverlay` spanning Mermaid, LaTeX, Cypher, GeoJSON, NetworkX, and D3.js.
 
-### Priority 7 — Security, Privacy & Multi-User Isolation Silo
-- **Weaknesses / Voids (Resolved in `vNext`):**
-  - Previously, `EnvAutoFillTarget` mapped only GitHub and OpenRouter keys—leaving database, storage, VPS gateway, and MCP tokens unmapped.
-  - No explicit isolation existed between private personal endpoints and shareable read-only collaborative forks.
-- **Shipped Resolution:**
-  - Extended `EnvAutoFillTarget` & `EncryptedEnvVaultStore` for `NEON_DATABASE_URL`, `OBJECT_STORAGE_ENDPOINT`, `LANCEDB_URL`, `VPS_GATEWAY_URL`, and `MCP_AUTH_TOKEN`.
-  - Enforced 3-tier visibility (`PRIVATE_SOLO`, `SANDBOXED_READ_ONLY`, `PUBLIC_TEAM`) + HTTPS/SSRF endpoint validation + zero-leakage shareable manifest exporter.
+### Priority 7 — Security, Release Hardening & App Check Silo
+- **Shipped Hardening:**
+  - Migrated `EXTERNAL_API_KEY` and `GITHUB_PAT` out of plain DataStore into `EncryptedEnvVaultStore` (Android Keystore AES-256-GCM) via one-time verified `SecretVaultMigration`.
+  - Locked down backups (`android:allowBackup="false"` + `backup_rules.xml` + `data_extraction_rules.xml`) and gated plaintext `.env` export behind an explicit unencrypted-export confirmation dialog (unchecked by default).
+  - Enabled R8 minification (`isMinifyEnabled = true`) with explicit ProGuard keep rules (`proguard-rules.pro`) and `res/raw/keep.xml` (`isShrinkResources = false` kept safely until on-device WebView/resource smoke tests confirm zero stripped assets).
+  - Switched release Firebase App Check from reCAPTCHA Enterprise to **Play Integrity** (`releaseImplementation(libs.firebase.appcheck.playintegrity)` + `debugImplementation(libs.firebase.appcheck.debug)`) and removed unused `recaptcha_site_key` from `firebase_applet_config.xml`.
 
 ---
 
@@ -180,32 +182,31 @@ After Databases & Storage (Silo #1), the remaining six silos are prioritized by 
 
 Ordered strictly so each completed phase **unlocks and compounds** the next with zero rework:
 
-1. **[SHIPPED IN THIS VERSION] Phase 0 — Universal Standby Registry, Privacy Isolation & Time Sync Foundation**
-   - Shipped `InfrastructureConnectorModels.kt`, `InfrastructureRegistryEngine.kt`, `TimeSyncContextEngine`, device-local DataStore persistence, extended `.env` Vault targets, 3-tab `InfrastructureHubSheet.kt`, and `NextStepsHandoffDialog.kt` (with one-tap Root GitHub Mirror).
-   - *Compounding Unlock:* Enables safe public/collaborator app sharing with zero credential leakage, offline UTC↔Local temporal grounding, and instant readiness when servers return online.
+1. **[SHIPPED] Phase 0 — Universal Standby Registry, Privacy Isolation & Time Sync Foundation**
+   - Shipped device-local connector registry, 3 storage/DB + 9 MCP templates, Custom BYO CRUD, 3-tier visibility scope, offline UTC↔Local Time Sync, and in-app Next Steps Handoff Viewer.
 
-2. **Phase 1 — Room Safe Migrations & Firestore Payload Guard**
+2. **[SHIPPED IN THIS HARDENING PASS] Phase 0.5 — Secrets Hardening, Release R8/Play Integrity, Self-Hosted Router & Streamable HTTP MCP Client**
+   - Verified Keystore migration of `EXTERNAL_API_KEY` & `GITHUB_PAT`, backup exclusions, plaintext `.env` export warning gate.
+   - Replaced misleading "Read-Only Sandbox Guard" with **Advisory Capability Display** + `serverEnforcesReadOnly` badge + accurate 5 corrected connector templates.
+   - Universal HTTPS endpoint validation + `AUTH_REQUIRED` probe classification + stage-scoped 150-token prompt context with private-name anonymization.
+   - Self-Hosted Text Router (`POST /query`, `GET /health`, 4,000-char cap, lane/latency UI chips).
+   - Release R8 minification (`proguard-rules.pro`, `res/raw/keep.xml`) + Play Integrity App Check split.
+   - Streamable HTTP JSON-RPC 2.0 MCP Client (`initialize`, `tools/list`, `tools/call`), dual-condition read-only classification (`annotations.readOnlyHint == true` AND user Hub toggle), untrusted-data envelope (2,000-char cap + local full-result reference store), and local SHA-256 audit log.
+
+3. **Phase 1 — Room Safe Migrations & Firestore Payload Guard**
    - Set `exportSchema = true` on `VortexLocalDatabase`, ship explicit `Migration(3, 4)`, snapshot `pending_sync_ops` before upgrades, and enforce a 256 KB pre-write payload guard before Firestore writes.
-   - *Compounding Unlock:* Eliminates offline data loss and creates clean blob-pointer columns for Object Storage.
 
-3. **Phase 2 — Object Storage Blob Offload + Neon PostgreSQL HTTPS SQL Adapter**
-   - Activate presigned S3/R2 upload/download for artifacts > 256 KB and wire `PostGisSchemaMapperView` directly to the Neon HTTPS SQL proxy with `BEGIN; ... ROLLBACK;` dry-run validation.
-   - *Compounding Unlock:* Permanently removes Firestore's 1 MB ceiling and turns PostGIS/AGE schema mapping into 1-tap live database execution.
+4. **Phase 2 — Object Storage Blob Offload + Neon PostgreSQL HTTPS SQL Adapter**
+   - Activate presigned S3/R2 upload/download for artifacts > 256 KB and wire `PostGisSchemaMapperView` to a Neon HTTPS SQL proxy with `BEGIN; ... ROLLBACK;` dry-run validation.
 
-4. **Phase 3 — Unified MCP JSON-RPC 2.0 / Streamable HTTP Client + Browser Fallback Chain**
-   - Implement shared `McpJsonRpcClient` (`tools/list`, `tools/call`) injecting `Authorization: Bearer` just-in-time from `EncryptedEnvVaultStore`.
-   - Activate automatic **Playwright MCP → Browser Use MCP** fallback chain when deterministic selectors fail or return empty DOM payloads.
-   - Wire live **Memgraph MCP** (enforcing `SANDBOXED_READ_ONLY` guard) and **Time & Date Sync MCP** remote delegation.
-   - *Compounding Unlock:* One compact transport activates all 9 MCP templates plus every user-added custom MCP server.
+5. **Phase 3 — Live Server Bring-Up & On-Device Release Verification**
+   - Run live `tools/list` against each online Tailscale/Cloudflare Access MCP server to confirm exact tool names and `annotations.readOnlyHint` values, curate exact-name allowlists, and complete on-device release APK smoke checks (launch, Play Integrity App Check, Firestore read, WebView Mermaid/LaTeX rendering).
 
-5. **Phase 4 — LanceDB Hybrid RAG + Letta Persistent Memory + Temporal Durable Pipelines**
+6. **Phase 4 — LanceDB Hybrid RAG + Letta Persistent Memory + Temporal Durable Pipelines**
    - Vector-index completed research stages, Roundtable critiques, and voice notes into **LanceDB**; sync longitudinal memory with **Letta MCP**; delegate 7-stage pipelines to **Temporal MCP** with local `WorkManager` fallback.
-   - *Compounding Unlock:* Elevates Vortex Researcher from single-session research into durable, cross-project institutional memory.
 
-6. **Phase 5 — Modular Refactor & Shared Canvas Polish ("Greasing the Gears")**
-   - Split `VortexViewModel.kt` (~3,750 LOC) into 4 cohesive state holders (`WorkspaceSyncController`, `PipelineController`, `RoundtableController`, `InfraHubController`).
-   - Unify `MermaidDiagramViewer` and `SpecializedFormatViewer` onto a shared `InteractiveDiagramSurface` + universal `DiagramAnnotationOverlay`.
-   - Connect **Vertex Solver MCP**, **VPS-Access Launcher MCP**, and **World Mechanic MCP** optimization hooks.
+7. **Phase 5 — Modular Refactor & Shared Canvas Polish ("Greasing the Gears")**
+   - Split `VortexViewModel.kt` into cohesive state holders (`WorkspaceSyncController`, `PipelineController`, `RoundtableController`, `InfraHubController`) and unify `MermaidDiagramViewer` + `SpecializedFormatViewer` onto a shared `InteractiveDiagramSurface`.
 
 ---
 
@@ -214,64 +215,66 @@ Ordered strictly so each completed phase **unlocks and compounds** the next with
 ### End-to-End Zero-Overlap Operational Workflow
 
 ```text
-[1. CAPTURE & SEARCH]  Voice Note / Dictation / Text Query
+[1. CAPTURE & SEARCH]  Voice Note / Dictation / Text Query (4,000-char counter on Self-Hosted)
         │  (Reuses single VortexSpeechController + MetadataTagEngine auto-tagger)
         ▼
-[2. UNIFIED CONTEXT]   buildAgentRuntimeContext() — Single Pass Assembler
-        │  • Authorized .env Policy (Human-Only secrets excluded)
+[2. UNIFIED CONTEXT]   buildAgentRuntimeContext(stageId) — Stage-Scoped Single Pass
+        │  • Authorized .env Policy (Human-Only secrets excluded; raw secrets never leave vault)
         │  • Canonical UTC ↔ Local Time Sync Envelope (Offline-first / MCP-ready)
-        │  • Non-Secret Infra & MCP Capabilities (PRIVATE_SOLO URLs redacted)
+        │  • Online Callable Allowlisted MCPs for Current Stage ONLY (<= 150 tokens;
+        │    PRIVATE_SOLO names anonymized unless shareNameWithAi == true)
         ▼
-[3. SYNTHESIS ENGINE]  Stage 0 Triage → 7-Stage Grounded Pipeline (Firebase AI / BYOK)
-        │  • Web Extraction Chain: Playwright MCP (Primary) → Browser Use MCP (Fallback)
-        │  • Graph Reasoning: Memgraph MCP (Read-Only Sandbox Guard enforced on forks)
-        │  • Future Offload: Temporal MCP durable execution + Letta archival memory
+[3. SYNTHESIS ENGINE]  Stage 0 Triage → 7-Stage Pipeline
+        │  • Firebase AI Logic (Play Integrity App Check in release)
+        │  • BYOK OpenAI-Compatible Router OR Self-Hosted Text Router (POST /query -> lane + latency)
+        │  • Manual Streamable HTTP MCP Tool Calls: exact-name allowlist + dual-condition RO
+        │    + [UNTRUSTED_MCP_TOOL_DATA] 2,000-char envelope + local SHA-256 audit log
         ▼
 [4. SPECIALIZED STUDIOS] Zero-Friction Rendering, Mapping & Brainstorming
         │  • Mermaid.js (+ PNG/SVG Export + Sticky-Note / Freehand Collaborative Layer)
         │  • LaTeX, Cypher/AGE, PostGIS GeoJSON, NetworkX, D3.js Studio
-        │  • PostGIS & PostgreSQL Entity Schema Mapper → Neon HTTPS SQL Proxy
+        │  • PostGIS & PostgreSQL Entity Schema Mapper
         ▼
 [5. PERSISTENCE & MIRROR] Tiered Storage & Atomic Sync
-           • Room Cache ↔ Firestore (< 256 KB) + Object Storage (> 256 KB blobs)
-           • LanceDB Semantic Index + GitHub Atomic Commit + Drive + Android SAF
+           • Room Cache ↔ Firestore (< 256 KB target) + Object Storage (> 256 KB planned)
+           • GitHub Atomic Commit + Drive + Android SAF + Keystore Vault (backup-excluded)
 ```
 
 ### Overlap, Resource-Sharing & UX Friction Audit Table
 
-| Overlap / Friction Point | Root Cause | "Greased" Optimization Strategy (Zero Quality Compromise) |
+| Overlap / Friction Point | Root Cause | "Greased" Optimization Strategy |
 | :--- | :--- | :--- |
-| **1. Prompt Context Assembly** | Pipeline stages, Roundtable, and PRD synthesis assembled system headers separately. | **Unified `buildAgentRuntimeContext()` (Shipped Now):** Single pass merges Authorized `.env` policy + UTC↔Local Time Sync envelope + non-secret Infra/MCP capabilities once per invocation. |
-| **2. Noisy Retries While Servers Are Offline** | Background polling against offline servers drains battery and spams error banners. | **Standby-First Architecture (Shipped Now):** Zero automatic background polling; manual 4-second bounded **Test Endpoint** probe with clean `STANDBY` status pills. |
-| **3. Duplicate Browser Automation Triggers** | Switching manually when dynamic SPAs break deterministic Playwright scripts adds UX friction. | **Declarative Fallback Chain (Shipped Now):** `Browser Use MCP` links directly behind `Playwright MCP` (`fallbackAfterId = mcp_playwright`) as one resilient browsing capability. |
-| **4. Shared Speech & Auto-Tagger Pipeline** | Voice dictation, voice notes, and dashboard voice search risked maintaining separate recognizers and taggers. | **Single Shared Controller (Active):** One `VortexSpeechController` + `MetadataTagEngine` powers voice search, note categorization (`Draft`, `Action Item`, `Research Query`), and project/chat indexing. |
-| **5. Four Parallel Sync Telemetry Models** | Room/Firestore, Drive, GitHub, and SAF independently compute SHA-256 digests and badges. | Consolidate onto one `WorkspaceDigestCache` + `SyncChannelBadgeState` so edits hash once and update all channels atomically. |
-| **6. Root Modal Proliferation (`MainActivity.kt`)** | 8+ boolean `show*Sheet` flags increase prop drilling and risk overlapping sheets. | Consolidate into a single sealed `ActiveWorkspaceModal` state guaranteeing flat 1-modal-at-a-time navigation depth. |
-| **7. Duplicate WebView & Export Pipelines** | `MermaidDiagramViewer` and `SpecializedFormatViewer` repeat WebView setup and PNG/SVG export code. | Share one `BaseWebDiagramEngine` + universal `DiagramAnnotationOverlay` across Mermaid, LaTeX, Cypher, GeoJSON, NetworkX, and D3.js. |
-| **8. ViewModel & Screen God-Objects** | `VortexViewModel.kt` and `ResearchScreen.kt` create wide recomposition scopes. | Decompose into scoped domain controllers with immutable `@Stable` UI slices. |
+| **1. Prompt Context Bloat & Leakage** | Injecting offline or private connectors into every LLM call wastes tokens and leaks private infra names. | **Stage-Scoped `buildAgentRuntimeContext(stageId)` (Shipped):** Emits only enabled + ONLINE + callable + allowlisted MCPs matching the stage, within a 150-token cap, anonymizing `PRIVATE_SOLO` names by default. |
+| **2. Noisy Retries While Servers Are Offline** | Background polling against offline servers drains battery and spams errors. | **Standby-First Architecture (Shipped):** Zero background polling; bounded manual **Test Endpoint**, **Check /health**, and **Sync `tools/list`** actions with explicit `AUTH REQUIRED` classification. |
+| **3. Non-Idempotent Tool Retries & Prompt Injection** | Auto-retrying mutating MCP calls or feeding raw tool blobs to an LLM risks duplicate side effects and injection. | **Hardened `McpJsonRpcClient` (Shipped):** No batching/auto-retry on non-read calls, dual-condition RO confirmation, `[UNTRUSTED_MCP_TOOL_DATA]` 2,000-char wrapper, local full-result reference store, and SHA-256 audit log. |
+| **4. Plaintext Credential Drift** | Storing `EXTERNAL_API_KEY` or `GITHUB_PAT` in DataStore duplicated vault storage without Keystore encryption. | **Verified Keystore Migration (Shipped):** One-time verified read-back migration into `EncryptedEnvVaultStore` before deleting DataStore entries; all secrets live in one AES-256-GCM store. |
+| **5. Four Parallel Sync Telemetry Models** | Room/Firestore, Drive, GitHub, and SAF independently compute SHA-256 digests and badges. | Consolidate onto one `WorkspaceDigestCache` + `SyncChannelBadgeState` (Phase 5). |
+| **6. Root Modal Proliferation (`MainActivity.kt`)** | Multiple boolean `show*Sheet` flags increase prop drilling. | Consolidate into a single sealed `ActiveWorkspaceModal` state (Phase 5). |
+| **7. Duplicate WebView & Export Pipelines** | `MermaidDiagramViewer` and `SpecializedFormatViewer` repeat WebView setup and PNG/SVG export code. | Share one `BaseWebDiagramEngine` + universal `DiagramAnnotationOverlay` (Phase 5). |
+| **8. ViewModel & Screen God-Objects** | `VortexViewModel.kt` and `ResearchScreen.kt` have wide recomposition scopes. | Decompose into scoped domain controllers with immutable `@Stable` UI slices (Phase 5). |
 
 ---
 
-## 5. Production Optimization Guarantee, Version Deltas & Collaborator Quickstart
+## 5. Hardening Summary, Collaborator Security Note & Bring-Up Playbook
 
-### How This Architecture Hardens Vortex Researcher for Production
-1. **Zero-Leakage Multi-User Isolation:** `PRIVATE_SOLO` endpoints stay strictly in device-local DataStore; credentials stay in Android Keystore AES-256-GCM (`EncryptedEnvVaultStore`). Public sharing and team collaboration never leak personal infrastructure or tokens.
-2. **Defense-in-Depth Agent Sandboxing:** Collaborative endpoints (such as a forked read-only Memgraph MCP) enforce client-side write/mutation capability stripping (`write`, `create`, `merge`, `delete`, `drop`, `insert`, `update`, `launch`, `restart`, `terminate`) alongside server-side read-only permissions.
-3. **Deterministic Temporal Accuracy:** Canonical UTC + User Local Timezone injection prevents agent date/timezone drift even while remote MCP servers are offline.
-4. **Transport & SSRF Hygiene:** Endpoint validator enforces `https://` for remote hosts and blocks cloud metadata SSRF addresses (`169.254.169.254`, `metadata.google.internal`, `100.100.100.200`).
+### Summary of Hardening Corrections Shipped
+1. **Secrets at Rest & Backup Lockdown:** `EXTERNAL_API_KEY` and `GITHUB_PAT` migrated via verified one-time `SecretVaultMigration` into `EncryptedEnvVaultStore` (Android Keystore AES-256-GCM). Set `android:allowBackup="false"` and excluded DataStore, vault, MCP audit/result files, and Room DB in `backup_rules.xml` & `data_extraction_rules.xml`. Plaintext `.env` export now requires an explicit unencrypted-export acknowledgment (unchecked by default).
+2. **Honest Read-Only Model:** Renamed substring grouping to **Advisory Capability Display** (explicitly marked NOT a security control). Added per-connector **`serverEnforcesReadOnly`** badge. Live MCP calls enforce a deny-by-default exact-name allowlist from `tools/list` and dual-condition read-only classification (`annotations.readOnlyHint == true` **AND** user read-only toggle in the Hub; both values shown per tool).
+3. **Accurate Connector Templates:** Corrected World Mechanic ("Stage"), Time Sync (`get_current_time`), Memgraph (7 real tools + server-side `MCP_READ_ONLY` + query allowlist preset), VPS-Access (disabled, locked `PRIVATE_SOLO`, confirm every call), and Browser Use (server-side isolated sandbox only + editable fallback trigger). All expected tool lists are marked *"expected; confirm with `tools/list` when online"*.
+4. **Universal HTTPS & Auth-Aware Probing:** Direct per-connector HTTPS URLs are primary (`useGatewayProxy = false`). Any valid HTTPS host (`*.ts.net:<port>`, Cloudflare Access, Neon, S3/R2/MinIO) is allowed; HTTP is loopback-only; cloud metadata IPs are SSRF-blocked; redirects are disabled; `401`/`403`/`3xx` map to **`AUTH REQUIRED`**. Supports Bearer token + custom header vault refs resolved just-in-time.
+5. **Stage-Scoped, Budgeted Agent Context:** `buildAuthorizedAgentInfraContext(state, currentStageId)` emits only enabled + `ONLINE` + callable + allowlisted MCPs for the active stage, capped at 150 tokens, with `PRIVATE_SOLO` names anonymized unless `shareNameWithAi == true`.
+6. **Self-Hosted Text Router:** `POST <baseUrl>/query` (`{"prompt": "..."}`, hard 4,000-char cap that fails with a clear user-facing error instead of silently truncating + ResearchScreen counter/trim/preview, grounding OFF by default + opt-in summary) and `GET <baseUrl>/health`, surfacing `lane` and `latency` chips on Stage cards and Chat turns.
+7. **Release Hardening & Play Integrity App Check:** Enabled R8 minification (`isMinifyEnabled = true`) with explicit ProGuard rules and `res/raw/keep.xml` (`isShrinkResources = false` retained for asset safety until on-device WebView verification). Split App Check into `firebase-appcheck-playintegrity` (release) and `firebase-appcheck-debug` (debug), removing unused `recaptcha_site_key`.
+8. **Streamable HTTP JSON-RPC 2.0 MCP Client:** Implemented `initialize` (`Mcp-Session-Id`) followed immediately by the `notifications/initialized` notification (no JSON-RPC `id`, same `Mcp-Session-Id`), `tools/list` (with template mismatch warnings), and `tools/call` (deny-by-default allowlist, dual-condition RO, no batching/no auto-retry on non-read, `[UNTRUSTED_MCP_TOOL_DATA]` 2,000-char cap + local full-result reference store, local SHA-256 audit log).
 
-### Concrete Deltas Shipped in This Version (`vNext`)
-- **Universal Standby Infrastructure & MCP Registry (`InfrastructureConnectorModels.kt`, `InfrastructureRegistryEngine.kt`):**
-  - 3 universal storage/DB templates (**Neon/PostgreSQL + PostGIS/AGE**, **S3/R2/MinIO Object Storage**, **LanceDB Vector Store**)
-  - 9 universal MCP server templates (**Temporal**, **Letta**, **Memgraph** with 1-tap Sandboxed Read-Only Fork preset, **Time & Date Sync**, **Vertex Solver**, **Playwright**, **Browser Use** as explicit fallback after Playwright, **VPS-Access Launcher**, **World Mechanic**)
-  - Full **+ Add Custom DB/Storage** and **+ Add Custom MCP Server** CRUD
-  - 3-tier visibility scope (`PRIVATE_SOLO`, `SANDBOXED_READ_ONLY`, `PUBLIC_TEAM`), Read-Only Sandbox Guard, HTTPS/SSRF validator, manual 4s bounded probe, and zero-leakage shareable manifest exporter
-- **Offline-Capable UTC ↔ Local Time Sync Engine (`TimeSyncContextEngine`):** Live Hub preview + automatic 7-stage pipeline prompt injection via `buildAgentRuntimeContext()`
-- **Extended Encrypted `.env` Vault (`EnvSecretModels.kt`, `EncryptedEnvVaultStore.kt`):** Added auto-detection and discrete auto-fill targets for `NEON_DATABASE_URL`, `OBJECT_STORAGE_ENDPOINT`, `LANCEDB_URL`, `VPS_GATEWAY_URL`, and `MCP_AUTH_TOKEN`
-- **Unified 3-Tab `InfrastructureHubSheet` & Interactive `NextStepsHandoffDialog`:** Accessible from the Dashboard Command Menu with section jump chips, Markdown preview, Copy, SAF `.md` export, and one-tap **Save to Project & Mirror to GitHub** targeting the root `Vortex Researcher- Next Steps.md`
+### Collaborator Security Note — Firebase API Key Restrictions (IMPORTANT)
+- The Firebase client configuration files (`firebase-applet-config.json`, `app/src/main/res/values/firebase_applet_config.xml`, `firebase.json`, `firebase-blueprint.json`, `app/google-services.json`) hold public client settings required to connect to Firebase and are **not** private secrets.
+- **Required Google Cloud Console Action:** Before distributing any release build, **restrict the Firebase API key in Google Cloud Console** to this app's Android package name (`com.aistudio.vortexresearcher.k9m4px`) and your **release signing-certificate SHA-256 fingerprint**, and enforce **Firebase App Check (Play Integrity)** on Firestore and Firebase AI Logic.
 
-### Collaborator Quickstart — Bringing Servers Online & Mirroring to GitHub
-1. **Keep Personal Infra Private:** Leave personal DBs and MCP servers on **`PRIVATE SOLO`** in *Dashboard Menu → Universal DB & MCP Hub*. Store all tokens exclusively in *Encrypted .env Secrets Vault*.
-2. **Enable Collaborative Read-Only Fork:** On *Memgraph MCP*, tap **Apply Sandboxed Read-Only Fork Preset** to lock `SANDBOXED_READ_ONLY` + `readOnlyEnforced = true`, enter the shared read-only HTTPS endpoint, and tap **Test Endpoint**.
-3. **Activate Gateway or Direct Endpoints:** In Tab 3 (*Time & Privacy*), set your optional HTTPS Gateway Base URL (or configure direct per-connector HTTPS URLs) and tap **Test Endpoint** to transition cleanly from `STANDBY` → `ONLINE`.
-4. **Mirror Documentation to GitHub:** Open *Dashboard Menu → Vortex Researcher- Next Steps* and tap **Save to Project & Mirror to GitHub** (or push the root `Vortex Researcher- Next Steps.md` directly via AI Studio's GitHub integration).
+### Collaborator Bring-Up Playbook (When Servers Come Online)
+1. **Store Credentials Locally Only:** Add Bearer tokens, custom header secrets, `EXTERNAL_API_KEY`, and `GITHUB_PAT` exclusively in *Dashboard Menu → Secure .env Secrets Vault*. Never commit `.env` exports.
+2. **Configure Direct HTTPS Endpoints:** In *Universal DB & MCP Hub*, enter each server's direct HTTPS URL (`https://<machine>.<tailnet>.ts.net:<port>/mcp` for owner Tailscale servers, or your Cloudflare Access sandbox URL for shared sandboxes), bind its Vault Secret Ref, and tap **Test Endpoint**.
+3. **Sync `tools/list` & Curate Exact Allowlists:** Once a connector probes `ONLINE`, tap **Sync `tools/list`** to inspect live tools, review any template mismatch warnings, allowlist only required exact tool names, and toggle **User RO** only on tools whose server `annotations.readOnlyHint` is `true` and whose read-only behavior is enforced server-side.
+4. **Verify Memgraph Sandbox Server-Side:** On collaborative Memgraph forks, tap **Apply Memgraph Sandboxed Read-Only Preset** and confirm the backend enforces `MCP_READ_ONLY` plus a query allowlist proxy.
+5. **Test Self-Hosted Text Router (Optional):** In *Model Router & GitHub Mirror*, choose **Self-Hosted Text Router**, enter the HTTPS base URL, set the Vault Ref, tap **Check /health**, and use **Preview JSON** on ResearchScreen to inspect the exact `{"prompt": "..."}` payload before sending.
+6. **Mirror Documentation to GitHub:** Open *Dashboard Menu → Vortex Researcher- Next Steps* and tap **Save to Project & Mirror to GitHub** so the repository root `Vortex Researcher- Next Steps.md` stays in sync.

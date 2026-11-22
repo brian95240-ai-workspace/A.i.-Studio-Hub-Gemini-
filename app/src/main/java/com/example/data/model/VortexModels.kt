@@ -207,6 +207,24 @@ enum class RoutingMode(val wire: String, val label: String, val description: Str
     }
 }
 
+enum class ExternalRouterType(val wire: String, val label: String, val endpointHint: String) {
+    OPENAI_COMPATIBLE(
+        "OPENAI_COMPATIBLE",
+        "OpenAI-Compatible (/chat/completions)",
+        "https://openrouter.ai/api/v1/"
+    ),
+    SELF_HOSTED_TEXT(
+        "SELF_HOSTED_TEXT",
+        "Self-Hosted Text (/query)",
+        "https://llm.example.com"
+    );
+
+    companion object {
+        fun fromWire(value: String?): ExternalRouterType =
+            entries.firstOrNull { it.wire.equals(value, ignoreCase = true) } ?: OPENAI_COMPATIBLE
+    }
+}
+
 enum class RoundtableStatus(val wire: String, val label: String) {
     QUEUED("QUEUED", "Queued"),
     ANALYZING("ANALYZING", "Scrutinizing"),
@@ -233,6 +251,8 @@ data class StageRecord(
     val title: String = "",
     val status: String = "PENDING", // PENDING, RUNNING, COMPLETED, SKIPPED, FAILED
     val modelUsed: String = "",
+    val responseLane: String = "",
+    val responseLatencySeconds: Double? = null,
     val routingReason: String = "",
     val fallbackNote: String = "",
     val content: String = "",
@@ -252,10 +272,14 @@ data class RoutingPreferences(
     val routingMode: RoutingMode = RoutingMode.AUTO_STRATEGIC,
     val escalationThreshold: Int = 6, // 8=Conservative, 6=Balanced, 4=Aggressive
     val externalEnabled: Boolean = false,
+    val externalRouterType: ExternalRouterType = ExternalRouterType.OPENAI_COMPATIBLE,
     val externalBaseUrl: String = "https://openrouter.ai/api/v1/",
-    val externalApiKey: String = "",
+    val externalAuthVaultRef: String = "EXTERNAL_API_KEY",
+    val externalApiKey: String = "", // In-memory projection from EncryptedEnvVaultStore only; never stored in DataStore
+    val selfHostedIncludeGrounding: Boolean = false, // Opt-in per request; OFF by default for /query
+    val selfHostedApprovedSummary: String = "",
     val domainModelMatrix: Map<String, String> = defaultDomainMatrix(),
-    val githubPat: String = "",
+    val githubPat: String = "", // In-memory projection from EncryptedEnvVaultStore only; never stored in DataStore
     val githubUsername: String = "",
     val githubDefaultPrivate: Boolean = true,
     val githubAutoMirror: Boolean = false,
@@ -281,6 +305,8 @@ data class ChatTurn(
     val role: String = "USER",
     val content: String = "",
     val modelUsed: String = "",
+    val responseLane: String = "",
+    val responseLatencySeconds: Double? = null,
     val sources: List<GroundingSource> = emptyList(),
     val timestampMillis: Long = 0L,
     val category: String = "",

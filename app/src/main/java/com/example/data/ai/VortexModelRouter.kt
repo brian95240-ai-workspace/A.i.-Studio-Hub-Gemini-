@@ -1,6 +1,7 @@
 package com.example.data.ai
 
 import android.util.Log
+import com.example.data.model.ExternalRouterType
 import com.example.data.model.GroundingSource
 import com.example.data.model.MetadataTagEngine
 import com.example.data.model.NoteCategory
@@ -32,6 +33,8 @@ data class GroundedGenerationResult(
     val text: String,
     val modelUsed: String,
     val routingReason: String,
+    val responseLane: String = "",
+    val latencySeconds: Double? = null,
     val fallbackNote: String = "",
     val searchQueries: List<String> = emptyList(),
     val sources: List<GroundingSource> = emptyList()
@@ -233,7 +236,16 @@ class VortexModelRouter(
         val combinedPrompt = "$systemDirective\n\n$userPrompt"
 
         if (decision.useExternalApi && prefs.externalEnabled && prefs.externalApiKey.isNotBlank()) {
-            // First gather concise live Google Search evidence via Flash if available, then hand off to External Model
+            if (prefs.externalRouterType == ExternalRouterType.SELF_HOSTED_TEXT) {
+                return executeSelfHostedTextRoute(
+                    userPrompt = userPrompt,
+                    combinedGeminiFallbackPrompt = combinedPrompt,
+                    decision = decision,
+                    prefs = prefs
+                )
+            }
+
+            // OpenAI-compatible external API: gather concise live Google Search evidence via Flash if available
             val searchBrief = runCatching {
                 callGeminiGrounded(
                     model = flashGrounded,
@@ -303,6 +315,115 @@ class VortexModelRouter(
             model = flashGrounded,
             modelLabel = MODEL_FLASH,
             prompt = combinedPrompt,
+            routingReason = decision.reason
+        )
+    }
+
+    /**
+     * Direct Self-Hosted Text Router invocation (/query).
+     * - Never runs Google Search grounding unless prefs.selfHostedIncludeGrounding == true.
+     * - Sends ONLY `{"prompt": "..."}` (no system prompt; server provides its own).
+     * - Enforces the 4,000-character cap before sending.
+     */
+    suspend fun callSelfHostedDirect(
+        userPrompt: String,
+        prefs: RoutingPreferences,
+        includeGroundingOverride: Boolean? = null
+    ): Result<GroundedGenerationResult> {
+        val useGrounding = includeGroundingOverride ?: prefs.selfHostedIncludeGrounding
+        val searchBrief = if (useGrounding) {
+            runCatching {
+                callGeminiGrounded(
+                    model = flashGrounded,
+                    modelLabel = MODEL_FLASH,
+                    prompt = "Return a brief (under 800 characters) factual Google Search evidence digest for:\n${userPrompt.take(1500)}",
+                    routingReason = "Opt-in grounding sweep for self-hosted router"
+                )
+            }.getOrNull()
+        } else {
+            null
+        }
+        val composed = ExternalRouterApi.composeSelfHostedPrompt(
+            userPrompt = userPrompt,
+            approvedSummary = prefs.selfHostedApprovedSummary,
+            groundingEvidence = searchBrief?.text?.take(900).orEmpty()
+        )
+        return externalRouterApi.selfHostedQuery(
+            baseUrl = prefs.externalBaseUrl,
+            bearerToken = prefs.externalApiKey,
+            prompt = composed
+        ).map { resp ->
+            GroundedGenerationResult(
+                text = resp.response,
+                modelUsed = resp.model,
+                responseLane = resp.lane,
+                latencySeconds = resp.latencySeconds,
+                routingReason = "Self-Hosted Text Router (/query) · lane=${resp.lane}",
+                searchQueries = searchBrief?.searchQueries.orEmpty(),
+                sources = searchBrief?.sources.orEmpty()
+            )
+        }
+    }
+
+    internal suspend fun executeSelfHostedTextRoute(
+        userPrompt: String,
+        combinedGeminiFallbackPrompt: String,
+        decision: RouteDecision,
+        prefs: RoutingPreferences
+    ): GroundedGenerationResult {
+        val searchBrief = if (prefs.selfHostedIncludeGrounding) {
+            runCatching {
+                callGeminiGrounded(
+                    model = flashGrounded,
+                    modelLabel = MODEL_FLASH,
+                    prompt = "Return a brief (under 800 characters) factual Google Search evidence digest for:\n${userPrompt.take(1500)}",
+                    routingReason = "Opt-in grounding sweep for self-hosted router"
+                )
+            }.getOrNull()
+        } else {
+            null
+        }
+        val composed = ExternalRouterApi.composeSelfHostedPrompt(
+            userPrompt = userPrompt,
+            approvedSummary = prefs.selfHostedApprovedSummary,
+            groundingEvidence = searchBrief?.text?.take(900).orEmpty()
+        )
+        if (composed.length > ExternalRouterApi.SELF_HOSTED_MAX_PROMPT_CHARS) {
+            throw IllegalArgumentException(
+                "Self-Hosted Text Router prompt is ${composed.length} characters, exceeding the " +
+                    "${ExternalRouterApi.SELF_HOSTED_MAX_PROMPT_CHARS}-character limit. " +
+                    "Trim the prompt or shorten the approved summary/grounding before sending."
+            )
+        }
+        val selfHostedRes = externalRouterApi.selfHostedQuery(
+            baseUrl = prefs.externalBaseUrl,
+            bearerToken = prefs.externalApiKey,
+            prompt = composed
+        )
+        selfHostedRes.onSuccess { resp ->
+            return GroundedGenerationResult(
+                text = resp.response,
+                modelUsed = resp.model,
+                responseLane = resp.lane,
+                latencySeconds = resp.latencySeconds,
+                routingReason = "${decision.reason} · lane=${resp.lane}",
+                searchQueries = searchBrief?.searchQueries.orEmpty(),
+                sources = searchBrief?.sources.orEmpty()
+            )
+        }.onFailure { err ->
+            Log.w(TAG, "Self-hosted text router call failed, falling back to Gemini 3.8 Flash", err)
+            return callGeminiGrounded(
+                model = flashGrounded,
+                modelLabel = MODEL_FLASH,
+                prompt = combinedGeminiFallbackPrompt,
+                routingReason = decision.reason,
+                fallbackNote = "Self-Hosted Text Router unavailable (${err.message?.take(80)}); auto-fallback to $MODEL_FLASH."
+            )
+        }
+        return callGeminiGrounded(
+            model = flashGrounded,
+            modelLabel = MODEL_FLASH,
+            prompt = combinedGeminiFallbackPrompt,
             routingReason = decision.reason
         )
     }
@@ -516,7 +637,7 @@ class VortexModelRouter(
         )
     }
 
-    private data class RouteDecision(
+    internal data class RouteDecision(
         val targetModel: String,
         val useExternalApi: Boolean,
         val reason: String
@@ -561,6 +682,18 @@ class VortexModelRouter(
                 targetModel = MODEL_FLASH,
                 useExternalApi = false,
                 reason = "Complexity $complexityScore/10 handled optimally by $MODEL_FLASH."
+            )
+        }
+
+        if (prefs.externalEnabled &&
+            prefs.externalRouterType == ExternalRouterType.SELF_HOSTED_TEXT &&
+            prefs.externalBaseUrl.isNotBlank() &&
+            prefs.externalApiKey.isNotBlank()
+        ) {
+            return RouteDecision(
+                targetModel = "self-hosted/query",
+                useExternalApi = true,
+                reason = "Self-Hosted Text Router (/query) selected for '$domain' (complexity $complexityScore/10)."
             )
         }
 
