@@ -65,7 +65,9 @@ import com.example.auth.configureAppCheck
 import com.example.ui.components.EnvSecretsVaultSheet
 import com.example.ui.components.GitHubMirrorSheet
 import com.example.ui.components.GoogleDriveSyncSheet
+import com.example.ui.components.InfrastructureHubSheet
 import com.example.ui.components.ModelRouterAndGitHubSheet
+import com.example.ui.components.NextStepsHandoffDialog
 import com.example.ui.components.OfflineSyncStatusBanner
 import com.example.ui.components.ProjectExportSheet
 import com.example.ui.components.SyncConflictResolutionDialog
@@ -282,6 +284,7 @@ private fun AuthenticatedVortexWorkspace(
     val safRemoteHashes by viewModel.safRemoteHashes.collectAsStateWithLifecycle()
     val envSecrets by viewModel.envSecrets.collectAsStateWithLifecycle()
     val envAutoFillResolution by viewModel.envAutoFillResolution.collectAsStateWithLifecycle()
+    val infraRegistryState by viewModel.infraRegistryState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     val navController = rememberNavController()
@@ -292,6 +295,8 @@ private fun AuthenticatedVortexWorkspace(
 
     var showRouterSheet by remember { mutableStateOf(false) }
     var showEnvVaultSheet by remember { mutableStateOf(false) }
+    var showInfraHubSheet by remember { mutableStateOf(false) }
+    var showNextStepsDialog by remember { mutableStateOf(false) }
     var showTeamSheet by remember { mutableStateOf(false) }
     var showDriveSheet by remember { mutableStateOf(false) }
     var showGitHubSheet by remember { mutableStateOf(false) }
@@ -477,6 +482,8 @@ private fun AuthenticatedVortexWorkspace(
                                             viewModel.triggerManualOfflineSync()
                                         }
                                     },
+                                    onOpenInfraHub = { showInfraHubSheet = true },
+                                    onOpenNextStepsHandoff = { showNextStepsDialog = true },
                                     onOpenEnvVault = { showEnvVaultSheet = true },
                                     onOpenRouterSettings = { showRouterSheet = true },
                                     onSignOut = onSignOut,
@@ -676,6 +683,35 @@ private fun AuthenticatedVortexWorkspace(
             onCreateStarterEnv = viewModel::createStarterEnvVault,
             onExportEnvUri = viewModel::exportEnvFileToUri,
             onApplyAutoFillNow = viewModel::applyDiscreteEnvAutoFillNow
+        )
+    }
+
+    if (showInfraHubSheet) {
+        InfrastructureHubSheet(
+            state = infraRegistryState,
+            envSecretCount = envSecrets.size,
+            onDismiss = { showInfraHubSheet = false },
+            onUpdateConnector = viewModel::updateInfraConnector,
+            onAddCustomConnector = viewModel::addCustomInfraConnector,
+            onRemoveCustomConnector = viewModel::removeCustomInfraConnector,
+            onProbeConnector = viewModel::probeInfraConnector,
+            onUpdateGatewayAndTime = viewModel::updateInfraGatewayAndTime,
+            onOpenEnvVault = {
+                showInfraHubSheet = false
+                showEnvVaultSheet = true
+            },
+            onToast = { msg -> scope.launch { snackbarHostState.showSnackbar(msg) } }
+        )
+    }
+
+    if (showNextStepsDialog) {
+        NextStepsHandoffDialog(
+            activeProjectName = activeProject?.title,
+            githubConnected = routingPrefs.githubPat.isNotBlank(),
+            onDismiss = { showNextStepsDialog = false },
+            onExportMarkdownToUri = viewModel::exportSingleFile,
+            onAddToProjectAndMirrorGitHub = viewModel::mirrorNextStepsDocToProjectAndGitHub,
+            onToast = { msg -> scope.launch { snackbarHostState.showSnackbar(msg) } }
         )
     }
 

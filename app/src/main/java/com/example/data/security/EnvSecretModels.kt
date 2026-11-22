@@ -54,6 +54,31 @@ enum class EnvAutoFillTarget(val wire: String, val label: String, val hintKeys: 
         label = "External AI Router Base URL",
         hintKeys = listOf("OPENROUTER_BASE_URL", "OPENAI_BASE_URL", "EXTERNAL_BASE_URL", "ROUTER_BASE_URL")
     ),
+    NEON_DATABASE_URL(
+        wire = "NEON_DATABASE_URL",
+        label = "PostgreSQL / Neon Proxy URL",
+        hintKeys = listOf("NEON_DATABASE_URL", "NEON_HTTP_URL", "POSTGRES_URL", "DATABASE_URL")
+    ),
+    OBJECT_STORAGE_ENDPOINT(
+        wire = "OBJECT_STORAGE_ENDPOINT",
+        label = "Object Storage Endpoint (S3/R2)",
+        hintKeys = listOf("OBJECT_STORAGE_ENDPOINT", "S3_ENDPOINT", "R2_ENDPOINT", "STORAGE_ENDPOINT")
+    ),
+    LANCEDB_URL(
+        wire = "LANCEDB_URL",
+        label = "LanceDB Vector Endpoint",
+        hintKeys = listOf("LANCEDB_URL", "LANCEDB_ENDPOINT", "VECTOR_DB_URL")
+    ),
+    VPS_GATEWAY_URL(
+        wire = "VPS_GATEWAY_URL",
+        label = "VPS / MCP Gateway Base URL",
+        hintKeys = listOf("VPS_GATEWAY_URL", "MCP_GATEWAY_URL", "CONTABO_GATEWAY_URL", "GATEWAY_BASE_URL")
+    ),
+    MCP_AUTH_TOKEN(
+        wire = "MCP_AUTH_TOKEN",
+        label = "MCP / Gateway Bearer Token",
+        hintKeys = listOf("MCP_AUTH_TOKEN", "MCP_TOKEN", "GATEWAY_AUTH_TOKEN", "MEMGRAPH_MCP_TOKEN")
+    ),
     CUSTOM_CREDENTIAL(
         wire = "CUSTOM_CREDENTIAL",
         label = "Custom / Manual Reference",
@@ -79,6 +104,12 @@ enum class EnvAutoFillTarget(val wire: String, val label: String, val hintKeys: 
                     normalizedKey.contains("KEY") -> EXTERNAL_ROUTER_API_KEY
                 (normalizedKey.contains("OPENROUTER") || normalizedKey.contains("OPENAI") || normalizedKey.contains("EXTERNAL")) &&
                     (normalizedKey.contains("URL") || normalizedKey.contains("BASE")) -> EXTERNAL_ROUTER_BASE_URL
+                normalizedKey.contains("NEON") || normalizedKey.contains("POSTGRES") -> NEON_DATABASE_URL
+                normalizedKey.contains("OBJECT_STORAGE") || normalizedKey.contains("R2_") || normalizedKey.contains("S3_") -> OBJECT_STORAGE_ENDPOINT
+                normalizedKey.contains("LANCEDB") || normalizedKey.contains("VECTOR_DB") -> LANCEDB_URL
+                (normalizedKey.contains("VPS") || normalizedKey.contains("GATEWAY")) &&
+                    (normalizedKey.contains("URL") || normalizedKey.contains("ENDPOINT")) -> VPS_GATEWAY_URL
+                normalizedKey.contains("MCP") && (normalizedKey.contains("TOKEN") || normalizedKey.contains("KEY")) -> MCP_AUTH_TOKEN
                 else -> CUSTOM_CREDENTIAL
             }
         }
@@ -251,6 +282,11 @@ data class DiscreteAutoFillResolution(
     val externalRouterApiKeyName: String? = null,
     val externalRouterBaseUrl: String? = null,
     val externalRouterBaseUrlKeyName: String? = null,
+    val neonDatabaseUrl: String? = null,
+    val objectStorageEndpoint: String? = null,
+    val lanceDbUrl: String? = null,
+    val vpsGatewayUrl: String? = null,
+    val mcpAuthToken: String? = null,
     val activeAutoFillCount: Int = 0
 )
 
@@ -445,8 +481,42 @@ object EnvSecretValidator {
                 }
             }
 
-            EnvAutoFillTarget.EXTERNAL_ROUTER_BASE_URL -> {
+            EnvAutoFillTarget.EXTERNAL_ROUTER_BASE_URL,
+            EnvAutoFillTarget.OBJECT_STORAGE_ENDPOINT,
+            EnvAutoFillTarget.LANCEDB_URL,
+            EnvAutoFillTarget.VPS_GATEWAY_URL -> {
                 validateEndpointUrl(trimmed)
+            }
+
+            EnvAutoFillTarget.NEON_DATABASE_URL -> {
+                if (trimmed.startsWith("postgres://", ignoreCase = true) ||
+                    trimmed.startsWith("postgresql://", ignoreCase = true) ||
+                    trimmed.startsWith("https://", ignoreCase = true)
+                ) {
+                    EnvFieldValidationResult(
+                        severity = EnvValidationSeverity.VALID,
+                        message = "Valid PostgreSQL / Neon connection URL."
+                    )
+                } else {
+                    EnvFieldValidationResult(
+                        severity = EnvValidationSeverity.WARNING,
+                        message = "Expected https:// (SQL proxy) or postgresql:// connection string."
+                    )
+                }
+            }
+
+            EnvAutoFillTarget.MCP_AUTH_TOKEN -> {
+                if (trimmed.any { it.isWhitespace() }) {
+                    EnvFieldValidationResult(
+                        severity = EnvValidationSeverity.ERROR,
+                        message = "MCP bearer token cannot contain spaces."
+                    )
+                } else {
+                    EnvFieldValidationResult(
+                        severity = EnvValidationSeverity.VALID,
+                        message = "Valid MCP / Gateway auth token."
+                    )
+                }
             }
 
             else -> {

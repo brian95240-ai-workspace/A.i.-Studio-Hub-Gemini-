@@ -110,6 +110,8 @@ fun ProjectDashboardScreen(
     ) -> Unit,
     onJoinProject: (String) -> Unit,
     onTriggerSync: () -> Unit,
+    onOpenInfraHub: () -> Unit,
+    onOpenNextStepsHandoff: () -> Unit,
     onOpenEnvVault: () -> Unit,
     onOpenRouterSettings: () -> Unit,
     onSignOut: () -> Unit,
@@ -329,6 +331,8 @@ fun ProjectDashboardScreen(
                             if (bulkMode) exitBulkMode() else bulkMode = true
                         },
                         onTriggerSync = onTriggerSync,
+                        onOpenInfraHub = onOpenInfraHub,
+                        onOpenNextStepsHandoff = onOpenNextStepsHandoff,
                         onOpenEnvVault = onOpenEnvVault,
                         onOpenRouterSettings = onOpenRouterSettings,
                         onSignOut = onSignOut

@@ -8,6 +8,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.data.infra.InfrastructureRegistryCodec
+import com.example.data.infra.InfrastructureRegistryEngine
+import com.example.data.infra.InfrastructureRegistryState
 import com.example.data.model.RoutingMode
 import com.example.data.model.RoutingPreferences
 import com.example.data.model.VortexJson
@@ -42,6 +45,7 @@ class LocalPreferencesStore(private val context: Context) {
         val DRIVE_FOLDER_IDS_JSON = stringPreferencesKey("drive_folder_ids_json")
         val DRIVE_HASHES_JSON = stringPreferencesKey("drive_hashes_json")
         val DRIVE_LAST_SYNC_JSON = stringPreferencesKey("drive_last_sync_json")
+        val INFRA_REGISTRY_JSON = stringPreferencesKey("infra_registry_json")
     }
 
     val routingPreferences: Flow<RoutingPreferences> = context.vortexDataStore.data.map { prefs ->
@@ -93,6 +97,16 @@ class LocalPreferencesStore(private val context: Context) {
 
     val githubLastSyncLabels: Flow<Map<String, String>> = context.vortexDataStore.data.map { prefs ->
         VortexJson.decodeStringMap(prefs[Keys.GITHUB_LAST_SYNC_JSON])
+    }
+
+    /**
+     * Device-local universal Infrastructure & MCP Registry.
+     * PRIVATE_SOLO endpoints remain strictly on this device and are never synced to Firestore.
+     */
+    val infrastructureRegistry: Flow<InfrastructureRegistryState> = context.vortexDataStore.data.map { prefs ->
+        InfrastructureRegistryEngine.mergeWithDefaults(
+            InfrastructureRegistryCodec.decode(prefs[Keys.INFRA_REGISTRY_JSON])
+        )
     }
 
     suspend fun getCurrentRoutingPreferences(): RoutingPreferences = routingPreferences.first()
@@ -208,6 +222,14 @@ class LocalPreferencesStore(private val context: Context) {
             val labels = VortexJson.decodeStringMap(prefs[Keys.DRIVE_LAST_SYNC_JSON]).toMutableMap()
             labels[projectId] = summaryLabel
             prefs[Keys.DRIVE_LAST_SYNC_JSON] = VortexJson.encodeStringMap(labels)
+        }
+    }
+
+    suspend fun saveInfrastructureRegistry(state: InfrastructureRegistryState) {
+        context.vortexDataStore.edit { prefs ->
+            prefs[Keys.INFRA_REGISTRY_JSON] = InfrastructureRegistryCodec.encode(
+                state.copy(updatedAtMillis = System.currentTimeMillis())
+            )
         }
     }
 }

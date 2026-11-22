@@ -260,6 +260,11 @@ class EncryptedEnvVaultStore(private val context: Context) {
         var routerKeyName: String? = null
         var routerBaseUrl: String? = null
         var routerBaseUrlName: String? = null
+        var neonUrl: String? = null
+        var objectStorageUrl: String? = null
+        var lanceDbUrl: String? = null
+        var vpsGatewayUrl: String? = null
+        var mcpAuthToken: String? = null
 
         enabled.forEach { entry ->
             when (entry.resolvedTarget()) {
@@ -279,6 +284,21 @@ class EncryptedEnvVaultStore(private val context: Context) {
                     routerBaseUrl = entry.value.trim()
                     routerBaseUrlName = entry.key
                 }
+                EnvAutoFillTarget.NEON_DATABASE_URL -> if (neonUrl == null) {
+                    neonUrl = entry.value.trim()
+                }
+                EnvAutoFillTarget.OBJECT_STORAGE_ENDPOINT -> if (objectStorageUrl == null) {
+                    objectStorageUrl = entry.value.trim()
+                }
+                EnvAutoFillTarget.LANCEDB_URL -> if (lanceDbUrl == null) {
+                    lanceDbUrl = entry.value.trim()
+                }
+                EnvAutoFillTarget.VPS_GATEWAY_URL -> if (vpsGatewayUrl == null) {
+                    vpsGatewayUrl = entry.value.trim()
+                }
+                EnvAutoFillTarget.MCP_AUTH_TOKEN -> if (mcpAuthToken == null) {
+                    mcpAuthToken = entry.value.trim()
+                }
                 else -> Unit
             }
         }
@@ -292,6 +312,11 @@ class EncryptedEnvVaultStore(private val context: Context) {
             externalRouterApiKeyName = routerKeyName,
             externalRouterBaseUrl = routerBaseUrl,
             externalRouterBaseUrlKeyName = routerBaseUrlName,
+            neonDatabaseUrl = neonUrl,
+            objectStorageEndpoint = objectStorageUrl,
+            lanceDbUrl = lanceDbUrl,
+            vpsGatewayUrl = vpsGatewayUrl,
+            mcpAuthToken = mcpAuthToken,
             activeAutoFillCount = enabled.size
         )
     }

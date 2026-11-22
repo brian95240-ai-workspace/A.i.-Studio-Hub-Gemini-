@@ -43,6 +43,7 @@ import androidx.compose.material.icons.outlined.FolderZip
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.GroupAdd
 import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
@@ -137,6 +138,8 @@ fun DashboardCommandHero(
     onOpenJoinDialog: () -> Unit,
     onToggleBulkMode: () -> Unit,
     onTriggerSync: () -> Unit,
+    onOpenInfraHub: () -> Unit,
+    onOpenNextStepsHandoff: () -> Unit,
     onOpenEnvVault: () -> Unit,
     onOpenRouterSettings: () -> Unit,
     onSignOut: () -> Unit,
@@ -331,6 +334,54 @@ fun DashboardCommandHero(
                                 modifier = Modifier.testTag("dashboard_menu_bulk_zip")
                             )
                             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Hub,
+                                        contentDescription = null,
+                                        tint = ElectricCyan
+                                    )
+                                },
+                                text = {
+                                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                        Text(stringResource(R.string.dashboard_menu_infra_hub))
+                                        Text(
+                                            text = stringResource(R.string.dashboard_menu_infra_hub_sub),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    onOpenInfraHub()
+                                },
+                                modifier = Modifier.testTag("dashboard_menu_infra_hub")
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Description,
+                                        contentDescription = null,
+                                        tint = VerifiedEmerald
+                                    )
+                                },
+                                text = {
+                                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                        Text(stringResource(R.string.dashboard_menu_next_steps))
+                                        Text(
+                                            text = stringResource(R.string.dashboard_menu_next_steps_sub),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    onOpenNextStepsHandoff()
+                                },
+                                modifier = Modifier.testTag("dashboard_menu_next_steps")
+                            )
                             DropdownMenuItem(
                                 leadingIcon = {
                                     Icon(

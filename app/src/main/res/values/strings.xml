@@ -211,4 +211,9 @@
     <string name="postgis_mapper_export_sql">Export .sql</string>
     <string name="postgis_mapper_save_repo">Save Migration to Repo</string>
     <string name="cd_postgis_remove_column">Remove column from table mapping</string>
+    <string name="infra_hub_title">Universal DB, Storage &amp; MCP Hub</string>
+    <string name="dashboard_menu_infra_hub">Universal DB &amp; MCP Hub</string>
+    <string name="dashboard_menu_infra_hub_sub">Neon, Object Storage, LanceDB &amp; 9 MCPs</string>
+    <string name="dashboard_menu_next_steps">Vortex Researcher- Next Steps</string>
+    <string name="dashboard_menu_next_steps_sub">System audit, roadmap &amp; GitHub mirror</string>
 </resources>

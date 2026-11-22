@@ -17,12 +17,19 @@ import com.example.data.ai.Stage0TriageResult
 import com.example.data.ai.VortexModelRouter
 import com.example.data.ai.VortexPipelineOrchestrator
 import com.example.data.voice.VortexSpeechController
+import com.example.data.docs.VortexNextStepsDocProvider
 import com.example.data.export.BulkProjectExportBundle
 import com.example.data.export.BulkZipExporter
 import com.example.data.export.PdfReportOptions
 import com.example.data.export.UniversalExportFormat
 import com.example.data.export.UniversalFormatCatalog
 import com.example.data.github.GitHubAuthManager
+import com.example.data.infra.ConnectorKind
+import com.example.data.infra.ConnectorStatus
+import com.example.data.infra.ConnectorVisibility
+import com.example.data.infra.InfraConnectorProfile
+import com.example.data.infra.InfrastructureRegistryEngine
+import com.example.data.infra.InfrastructureRegistryState
 import com.example.data.github.GitHubAuthMethod
 import com.example.data.github.GitHubDeviceCodeSession
 import com.example.data.github.GitHubGitSyncEngine
@@ -197,6 +204,13 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
     ) { prefs, autoFill ->
         applyDiscreteAutoFillToPrefs(prefs, autoFill)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), RoutingPreferences())
+
+    val infraRegistryState: StateFlow<InfrastructureRegistryState> = prefsStore.infrastructureRegistry
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            InfrastructureRegistryEngine.defaultState()
+        )
 
     val safFolderBindings: StateFlow<Map<String, String>> = prefsStore.safFolderBindings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
@@ -1343,7 +1357,7 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
                     .map { it.detectedLanguage }
                     .filter { it !in listOf("Markdown", "Plain Text", "Text") }
                     .distinct()
-                val envPolicy = envVaultStore.buildAuthorizedModelPolicySummary()
+                val envPolicy = buildAgentRuntimeContext()
 
                 val output = orchestrator.runFromPass(
                     startPass = startPass,
@@ -3579,6 +3593,139 @@ class VortexViewModel(application: Application) : AndroidViewModel(application) 
             }
             _uiState.update { it.copy(extractingPostGisEntities = false) }
             onComplete(result)
+        }
+    }
+
+    /**
+     * Unified runtime context assembler ("greasing the gears"):
+     * Combines Authorized .env Policy + UTC<->Local Temporal Envelope + Non-Secret Infra/MCP capabilities
+     * in a single pass with zero leakage of PRIVATE_SOLO URLs or raw secrets.
+     */
+    private fun buildAgentRuntimeContext(): String = listOf(
+        envVaultStore.buildAuthorizedModelPolicySummary(),
+        InfrastructureRegistryEngine.buildAuthorizedAgentInfraContext(infraRegistryState.value)
+    ).filter { it.isNotBlank() }.joinToString("\n\n")
+
+    fun updateInfraConnector(updated: InfraConnectorProfile) {
+        viewModelScope.launch {
+            val current = infraRegistryState.value
+            val nextList = current.connectors.map { if (it.id == updated.id) updated else it }
+            prefsStore.saveInfrastructureRegistry(current.copy(connectors = nextList))
+            _uiState.update { it.copy(bannerMessage = "Saved ${updated.name} (${updated.visibility.shortBadge}) locally.") }
+        }
+    }
+
+    fun addCustomInfraConnector(
+        name: String,
+        kind: ConnectorKind,
+        endpointUrl: String,
+        visibility: ConnectorVisibility,
+        secretRef: String
+    ) {
+        viewModelScope.launch {
+            val current = infraRegistryState.value
+            val cleanUrl = endpointUrl.trim()
+            val profile = InfraConnectorProfile(
+                name = name.trim(),
+                providerLabel = if (kind.isStorageTier) "Custom BYO Database / Storage" else "Custom BYO MCP Server",
+                kind = kind,
+                templateKey = "custom_${System.currentTimeMillis()}",
+                description = "User-registered universal connector (stored strictly on device unless explicitly shared).",
+                visibility = visibility,
+                readOnlyEnforced = visibility == ConnectorVisibility.SANDBOXED_READ_ONLY,
+                status = if (cleanUrl.isNotBlank()) ConnectorStatus.CONFIGURED else ConnectorStatus.STANDBY,
+                useGatewayProxy = false,
+                endpointUrl = cleanUrl,
+                vaultSecretKeyRef = secretRef.trim(),
+                capabilities = if (kind.isStorageTier) listOf("query.read", "query.write") else listOf("mcp.tools_list", "mcp.tools_call"),
+                isCustom = true
+            )
+            prefsStore.saveInfrastructureRegistry(current.copy(connectors = current.connectors + profile))
+            _uiState.update { it.copy(bannerMessage = "Added custom connector '${profile.name}' locally.") }
+        }
+    }
+
+    fun removeCustomInfraConnector(connectorId: String) {
+        viewModelScope.launch {
+            val current = infraRegistryState.value
+            val nextList = current.connectors.filterNot { it.id == connectorId && it.isCustom }
+            prefsStore.saveInfrastructureRegistry(current.copy(connectors = nextList))
+            _uiState.update { it.copy(bannerMessage = "Removed custom connector.") }
+        }
+    }
+
+    fun updateInfraGatewayAndTime(
+        gatewayBaseUrl: String,
+        timezoneId: String,
+        attachTimeContext: Boolean
+    ) {
+        viewModelScope.launch {
+            val current = infraRegistryState.value
+            prefsStore.saveInfrastructureRegistry(
+                current.copy(
+                    gatewayBaseUrl = gatewayBaseUrl.trim(),
+                    localTimezoneId = timezoneId.trim().ifBlank { current.localTimezoneId },
+                    attachTimeContextToAgents = attachTimeContext
+                )
+            )
+            _uiState.update { it.copy(bannerMessage = "Saved Gateway & UTC↔Local Time Sync settings locally.") }
+        }
+    }
+
+    fun probeInfraConnector(connectorId: String) {
+        viewModelScope.launch {
+            val current = infraRegistryState.value
+            val target = current.connectors.firstOrNull { it.id == connectorId } ?: return@launch
+            val probingList = current.connectors.map {
+                if (it.id == connectorId) it.copy(status = ConnectorStatus.PROBING, lastProbeMessage = "Probing endpoint…") else it
+            }
+            prefsStore.saveInfrastructureRegistry(current.copy(connectors = probingList))
+
+            val result = InfrastructureRegistryEngine.probeConnector(target, current.gatewayBaseUrl)
+            val latest = infraRegistryState.value
+            val updatedList = latest.connectors.map {
+                if (it.id == connectorId) {
+                    it.copy(
+                        status = result.status,
+                        lastProbeMessage = result.summary,
+                        lastProbeAtMillis = System.currentTimeMillis()
+                    )
+                } else it
+            }
+            prefsStore.saveInfrastructureRegistry(latest.copy(connectors = updatedList))
+            _uiState.update { it.copy(bannerMessage = "${target.name}: ${result.summary}") }
+        }
+    }
+
+    fun mirrorNextStepsDocToProjectAndGitHub() {
+        val project = activeProject() ?: run {
+            _uiState.update { it.copy(errorMessage = "Select or create a project first to add '${VortexNextStepsDocProvider.CANONICAL_REPO_PATH}'.") }
+            return
+        }
+        val uid = currentUid()
+        if (!project.canEdit(uid)) {
+            _uiState.update { it.copy(errorMessage = "Read-Only members cannot write documentation into this repository.") }
+            return
+        }
+        val docPath = VortexNextStepsDocProvider.CANONICAL_REPO_PATH
+        val content = VortexNextStepsDocProvider.fullMarkdown()
+        val existing = project.parsedFiles().toMutableList()
+        existing.removeAll { it.relativePath.equals(docPath, ignoreCase = true) }
+        existing.add(ProjectFile(relativePath = docPath, content = content, category = "DOCS"))
+        val updated = project.copy(filesJson = VortexJson.encodeFiles(existing))
+
+        viewModelScope.launch {
+            offlineRepository.saveProjectContentOfflineFirst(updated, uid, editedFilePath = docPath)
+            val prefs = routingPreferences.value
+            if (prefs.githubPat.isNotBlank()) {
+                _uiState.update { it.copy(bannerMessage = "Saved $docPath — mirroring to GitHub…") }
+                pushToGitHub(
+                    commitReason = "Add/Update ${VortexNextStepsDocProvider.CANONICAL_DOC_TITLE}",
+                    projectOverride = updated
+                )
+            } else {
+                _uiState.update { it.copy(bannerMessage = "Saved $docPath to '${project.title}'. Connect GitHub Mirror to push.") }
+            }
         }
     }
 }
